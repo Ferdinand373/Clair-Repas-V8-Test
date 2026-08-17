@@ -1,10 +1,10 @@
 "use strict";
 
 /*
- * Clair V8 Fondation — FOUNDATION.6 TEST DE ROLLBACK AUTOMATIQUE
+ * Clair V8 Fondation — FOUNDATION.7 TEST DE ROLLBACK AUTOMATIQUE
  *
  * But de ce fichier :
- * 1) installer une candidate foundation.6 complète ;
+ * 1) installer une candidate foundation.7 complète ;
  * 2) conserver foundation.5 comme version saine précédente ;
  * 3) simuler automatiquement un échec de démarrage ;
  * 4) vérifier que le système revient seul sur foundation.5 ;
@@ -14,7 +14,7 @@
  */
 
 const APP_ID = "clair-repas";
-const RELEASE = "8.0.0-foundation.6";
+const RELEASE = "8.0.0-foundation.7";
 const DATA_SCHEMA = 2;
 
 const CACHE_PREFIX = "clair-repas-";
@@ -35,7 +35,7 @@ const CORE_FILES = [
 
 const BOOT_GRACE_MS = 18000;
 
-// Test volontaire : foundation.6 doit échouer puis revenir automatiquement sur foundation.5.
+// Test volontaire : foundation.7 doit échouer puis revenir automatiquement sur foundation.5.
 const ROLLBACK_SELF_TEST = true;
 const ROLLBACK_REASON = "rollback-self-test";
 
@@ -87,25 +87,9 @@ function foundationTag() {
 }
 
 function rollbackSelfTestTag() {
-  if (!ROLLBACK_SELF_TEST) return "";
-  return `<script data-clair-v8-rollback-self-test>
-(function () {
-  setTimeout(function () {
-    try {
-      if (navigator.serviceWorker && navigator.serviceWorker.controller) {
-        navigator.serviceWorker.controller.postMessage({
-          type: "CLAIR_V8_BOOT_FAIL",
-          app: "${APP_ID}",
-          release: "${RELEASE}",
-          dataSchema: ${DATA_SCHEMA},
-          reason: "${ROLLBACK_REASON}",
-          detail: "Test volontaire de retour automatique vers la dernière version saine"
-        });
-      }
-    } catch (_) {}
-  }, 250);
-})();
-</script>`;
+  // Foundation.7 : le test est déclenché directement pendant l'activation
+  // du service worker afin d'éviter tout problème de timing avec la page.
+  return "";
 }
 
 function responseInit(response) {
@@ -203,11 +187,13 @@ async function choosePreviousCache(state = {}) {
     name => isAppCache(name) && name !== CURRENT_CACHE
   );
 
-  for (const preferred of [
-    state.activeCache,
+  const preferredOrder = [
     state.lastHealthyCache,
-    state.previousCache
-  ]) {
+    state.previousCache,
+    state.probation ? null : state.activeCache
+  ];
+
+  for (const preferred of preferredOrder) {
     if (!preferred || preferred === CURRENT_CACHE) continue;
     if (!available.includes(preferred)) continue;
     if (await cacheHasIndex(preferred)) return preferred;
@@ -384,7 +370,7 @@ async function statusResponse() {
 <body>
   <div class="card">
     <h1>${escapeHtml(title)}</h1>
-    <p class="ok">${rollbackPassed ? "Foundation.6 a échoué volontairement et Clair Repas est revenu sur la dernière version saine." : "Le test n’a pas encore confirmé le retour automatique."}</p>
+    <p class="ok">${rollbackPassed ? "Foundation.7 a échoué volontairement et Clair Repas est revenu sur la dernière version saine." : "Le test n’a pas encore confirmé le retour automatique."}</p>
     <pre>${escapeHtml(JSON.stringify(details, null, 2))}</pre>
   </div>
 </body>
@@ -410,7 +396,12 @@ self.addEventListener("install", event => {
 self.addEventListener("activate", event => {
   event.waitUntil(
     (async () => {
-      await markCandidateActive();
+      let state = await markCandidateActive();
+
+      if (ROLLBACK_SELF_TEST) {
+        state = await rollbackIfNeeded(state, ROLLBACK_REASON);
+      }
+
       await self.clients.claim();
     })()
   );
