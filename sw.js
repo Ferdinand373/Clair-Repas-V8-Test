@@ -111,6 +111,8 @@ async function choosePreviousCache(state = {}) {
 async function cacheHasIndex(cacheName) {
   if (!cacheName) return false;
   try {
+   const names = await caches.keys(); 
+   if (!names.includes(cacheName)) return false; 
     const cache = await caches.open(cacheName);
     return Boolean(await cache.match(appIndexUrl()) || await cache.match(appRootUrl()));
   } catch (_) {
@@ -121,6 +123,7 @@ async function cacheHasIndex(cacheName) {
 async function markCandidateActive() {
   const previousState = await readState();
   const previousCache = await choosePreviousCache(previousState);
+  if (!(await cacheHasIndex(CURRENT_CACHE))) throw new Error("V8 activate: candidate cache invalid");
   return writeState({
     app: APP_ID,
     release: RELEASE,
@@ -151,7 +154,7 @@ async function rollbackIfNeeded(state, reason = "boot-failed") {
 async function currentServingState() {
   let state = await readState();
   if (!state.activeCache || !(await cacheHasIndex(state.activeCache))) {
-    state = await writeState({ ...state, activeCache: CURRENT_CACHE, release: RELEASE, probation: true });
+  state = await rollbackIfNeeded(state, "invalid-active-cache"); 
   }
   if (state.probation && state.bootStartedAt && Date.now() - Number(state.bootStartedAt) > BOOT_GRACE_MS) {
     state = await rollbackIfNeeded(state, "boot-watchdog-timeout");
