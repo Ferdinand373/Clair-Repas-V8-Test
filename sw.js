@@ -1,27 +1,43 @@
 "use strict";
 
 /*
- * Clair V8 Fondation — FOUNDATION.7 TEST DE ROLLBACK AUTOMATIQUE
+ * Clair V8 Fondation — FOUNDATION.8 STABLE LAB
  *
- * But de ce fichier :
- * 1) installer une candidate foundation.7 complète ;
- * 2) conserver foundation.5 comme version saine précédente ;
- * 3) simuler automatiquement un échec de démarrage ;
- * 4) vérifier que le système revient seul sur foundation.5 ;
- * 5) ne lire, modifier ou supprimer aucune donnée personnelle.
- *
- * IMPORTANT : ce fichier est destiné uniquement au dépôt Clair-Repas-V8-Test.
+ * Objectifs :
+ * - mise à jour atomique ;
+ * - retour automatique vers la dernière version saine ;
+ * - caches isolés par application + chemin GitHub Pages ;
+ * - migration sûre du dernier cache sain foundation.5 ;
+ * - aucune suppression ni modification des données personnelles.
  */
 
 const APP_ID = "clair-repas";
-const RELEASE = "8.0.0-foundation.7";
+const RELEASE = "8.0.0-foundation.8";
 const DATA_SCHEMA = 2;
+const BOOT_GRACE_MS = 18000;
 
-const CACHE_PREFIX = "clair-repas-";
-const CURRENT_CACHE = `${CACHE_PREFIX}app-${RELEASE}`;
-const META_CACHE = `${CACHE_PREFIX}v8-meta`;
+function fnv1a(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+const SCOPE_PATH = new URL(self.registration.scope).pathname;
+const SCOPE_ID = fnv1a(SCOPE_PATH);
+const CACHE_PREFIX = `clair-v8-${APP_ID}-${SCOPE_ID}-app-`;
+const CURRENT_CACHE = `${CACHE_PREFIX}${RELEASE}`;
+const META_CACHE = `clair-v8-${APP_ID}-${SCOPE_ID}-meta`;
 const META_URL = new URL("./__clair_v8_meta__", self.registration.scope).toString();
 const STATUS_URL = new URL("./__clair_v8_status__", self.registration.scope).toString();
+
+// Ancien espace de caches utilisé jusqu'à foundation.7. On le lit uniquement
+// pour copier la dernière version saine vers le nouvel espace isolé.
+const LEGACY_APP_PREFIX = "clair-repas-app-";
+const LEGACY_META_CACHE = "clair-repas-v8-meta";
+const LEGACY_META_URL = META_URL;
 
 const CORE_FILES = [
   "./",
@@ -33,12 +49,6 @@ const CORE_FILES = [
   "./v8/version.json"
 ];
 
-const BOOT_GRACE_MS = 18000;
-
-// Test volontaire : foundation.7 doit échouer puis revenir automatiquement sur foundation.5.
-const ROLLBACK_SELF_TEST = true;
-const ROLLBACK_REASON = "rollback-self-test";
-
 function appIndexUrl() {
   return new URL("./index.html", self.registration.scope).toString();
 }
@@ -47,18 +57,35 @@ function appRootUrl() {
   return new URL("./", self.registration.scope).toString();
 }
 
-function isMetaCache(name) {
-  return name === META_CACHE;
-}
-
 function isAppCache(name) {
-  return name.startsWith(CACHE_PREFIX) && !isMetaCache(name);
+  return Boolean(name && name.startsWith(CACHE_PREFIX));
 }
 
-async function readState() {
+async function cacheExists(cacheName) {
+  if (!cacheName) return false;
+  const names = await caches.keys();
+  return names.includes(cacheName);
+}
+
+async function cacheHasIndex(cacheName) {
+  if (!cacheName) return false;
   try {
-    const cache = await caches.open(META_CACHE);
-    const response = await cache.match(META_URL);
+    if (!(await cacheExists(cacheName))) return false;
+    const cache = await caches.open(cacheName);
+    return Boolean(
+      (await cache.match(appIndexUrl())) ||
+      (await cache.match(appRootUrl()))
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+async function readJsonState(cacheName, url) {
+  try {
+    if (!(await cacheExists(cacheName))) return {};
+    const cache = await caches.open(cacheName);
+    const response = await cache.match(url);
     if (!response) return {};
     const state = await response.json();
     return state && typeof state === "object" ? state : {};
@@ -67,8 +94,24 @@ async function readState() {
   }
 }
 
+async function readState() {
+  return readJsonState(META_CACHE, META_URL);
+}
+
+async function readLegacyState() {
+  return readJsonState(LEGACY_META_CACHE, LEGACY_META_URL);
+}
+
 async function writeState(state) {
-  const next = { ...state, updatedAt: new Date().toISOString() };
+  const next = {
+    ...state,
+    app: APP_ID,
+    dataSchema: DATA_SCHEMA,
+    scopePath: SCOPE_PATH,
+    scopeId: SCOPE_ID,
+    updatedAt: new Date().toISOString()
+  };
+
   const cache = await caches.open(META_CACHE);
   await cache.put(
     META_URL,
@@ -82,14 +125,98 @@ async function writeState(state) {
   return next;
 }
 
-function foundationTag() {
-  return `<script src="./v8/clair-foundation.js" data-clair-v8-foundation data-clair-app="${APP_ID}" data-clair-release="${RELEASE}" data-clair-schema="${DATA_SCHEMA}"></script>`;
+async function copyCache(sourceName, targetName) {
+  if (!sourceName || !targetName) return false;
+  if (!(await cacheHasIndex(sourceName))) return false;
+  if (await cacheHasIndex(targetName)) return true;
+
+  await caches.delete(targetName);
+  const source = await caches.open(sourceName);
+  const target = await caches.open(targetName);
+
+  try {
+    const requests = await source.keys();
+    for (const request of requests) {
+      const response = await source.match(request);
+      if (response) await target.put(request, response.clone());
+    }
+
+    if (!(await cacheHasIndex(targetName))) {
+      throw new Error("V8 migration: fallback cache invalid");
+    }
+    return true;
+  } catch (error) {
+    await caches.delete(targetName);
+    throw error;
+  }
 }
 
-function rollbackSelfTestTag() {
-  // Foundation.7 : le test est déclenché directement pendant l'activation
-  // du service worker afin d'éviter tout problème de timing avec la page.
-  return "";
+function legacyReleaseFromCache(cacheName) {
+  if (!cacheName || !cacheName.startsWith(LEGACY_APP_PREFIX)) return "legacy";
+  return cacheName.slice(LEGACY_APP_PREFIX.length) || "legacy";
+}
+
+async function chooseLegacyHealthyCache(legacyState = {}) {
+  const names = await caches.keys();
+  const available = names.filter(name => name.startsWith(LEGACY_APP_PREFIX));
+  const failed = legacyState.failedCache || null;
+
+  const preferred = [
+    legacyState.lastHealthyCache,
+    legacyState.probation ? null : legacyState.activeCache,
+    legacyState.previousCache
+  ];
+
+  for (const candidate of preferred) {
+    if (!candidate || candidate === failed) continue;
+    if (!available.includes(candidate)) continue;
+    if (await cacheHasIndex(candidate)) return candidate;
+  }
+
+  for (const candidate of available) {
+    if (candidate === failed) continue;
+    if (await cacheHasIndex(candidate)) return candidate;
+  }
+
+  return null;
+}
+
+async function migrateLegacyFallback() {
+  let state = await readState();
+
+  if (state.lastHealthyCache && (await cacheHasIndex(state.lastHealthyCache))) {
+    return state;
+  }
+
+  const legacyState = await readLegacyState();
+  const legacyHealthy = await chooseLegacyHealthyCache(legacyState);
+  if (!legacyHealthy) return state;
+
+  const migratedCache = `${CACHE_PREFIX}${legacyReleaseFromCache(legacyHealthy)}`;
+  const copied = await copyCache(legacyHealthy, migratedCache);
+  if (!copied) return state;
+
+  state = await writeState({
+    ...state,
+    release: state.release || legacyState.release || null,
+    activeCache:
+      state.activeCache && (await cacheHasIndex(state.activeCache))
+        ? state.activeCache
+        : migratedCache,
+    previousCache: state.previousCache || null,
+    lastHealthyCache: migratedCache,
+    failedCache: state.failedCache || null,
+    probation: Boolean(state.probation),
+    bootFailures: Number(state.bootFailures || 0),
+    migratedFromLegacy: legacyHealthy,
+    migratedAt: new Date().toISOString()
+  });
+
+  return state;
+}
+
+function foundationTag() {
+  return `<script src="./v8/clair-foundation.js" data-clair-v8-foundation data-clair-app="${APP_ID}" data-clair-release="${RELEASE}" data-clair-schema="${DATA_SCHEMA}"></script>`;
 }
 
 function responseInit(response) {
@@ -105,23 +232,31 @@ function responseInit(response) {
 
 async function injectFoundation(response) {
   const text = await response.text();
-  const tags = `${foundationTag()}\n${rollbackSelfTestTag()}`;
-
   if (text.includes("data-clair-v8-foundation")) {
-    if (!ROLLBACK_SELF_TEST || text.includes("data-clair-v8-rollback-self-test")) {
-      return new Response(text, responseInit(response));
-    }
-    const htmlWithTest = /<\/head>/i.test(text)
-      ? text.replace(/<\/head>/i, `${rollbackSelfTestTag()}\n</head>`)
-      : `${rollbackSelfTestTag()}\n${text}`;
-    return new Response(htmlWithTest, responseInit(response));
+    return new Response(text, responseInit(response));
   }
 
+  const tag = foundationTag();
   const html = /<head(?:\s[^>]*)?>/i.test(text)
-    ? text.replace(/<head(?:\s[^>]*)?>/i, match => `${match}\n${tags}`)
-    : `${tags}\n${text}`;
+    ? text.replace(/<head(?:\s[^>]*)?>/i, match => `${match}\n${tag}`)
+    : `${tag}\n${text}`;
 
   return new Response(html, responseInit(response));
+}
+
+async function validateVersionManifest(response) {
+  const manifest = await response.clone().json();
+  if (!manifest || manifest.foundationVersion !== RELEASE) {
+    throw new Error(
+      `V8 install: version.json mismatch (${manifest?.foundationVersion || "missing"} != ${RELEASE})`
+    );
+  }
+  if (manifest.app !== APP_ID) {
+    throw new Error(`V8 install: wrong app in version.json (${manifest.app || "missing"})`);
+  }
+  if (Number(manifest.dataSchema) !== DATA_SCHEMA) {
+    throw new Error(`V8 install: wrong data schema in version.json (${manifest.dataSchema})`);
+  }
 }
 
 async function fetchRequired(path) {
@@ -135,6 +270,10 @@ async function fetchRequired(path) {
 
   if (!response.ok) {
     throw new Error(`V8 install: ${path} -> HTTP ${response.status}`);
+  }
+
+  if (path === "./v8/version.json") {
+    await validateVersionManifest(response);
   }
 
   if (path === "./" || path === "./index.html") {
@@ -154,30 +293,13 @@ async function buildCandidateCache() {
       const url = new URL(path, self.registration.scope).toString();
       await cache.put(url, response.clone());
     }
+
+    if (!(await cacheHasIndex(CURRENT_CACHE))) {
+      throw new Error("V8 install: candidate cache invalid");
+    }
   } catch (error) {
     await caches.delete(CURRENT_CACHE);
     throw error;
-  }
-}
-
-async function cacheExists(cacheName) {
-  if (!cacheName) return false;
-  const names = await caches.keys();
-  return names.includes(cacheName);
-}
-
-async function cacheHasIndex(cacheName) {
-  if (!cacheName) return false;
-
-  try {
-    if (!(await cacheExists(cacheName))) return false;
-    const cache = await caches.open(cacheName);
-    return Boolean(
-      (await cache.match(appIndexUrl())) ||
-      (await cache.match(appRootUrl()))
-    );
-  } catch (_) {
-    return false;
   }
 }
 
@@ -187,16 +309,16 @@ async function choosePreviousCache(state = {}) {
     name => isAppCache(name) && name !== CURRENT_CACHE
   );
 
-  const preferredOrder = [
+  const preferred = [
     state.lastHealthyCache,
-    state.previousCache,
-    state.probation ? null : state.activeCache
+    state.probation ? null : state.activeCache,
+    state.previousCache
   ];
 
-  for (const preferred of preferredOrder) {
-    if (!preferred || preferred === CURRENT_CACHE) continue;
-    if (!available.includes(preferred)) continue;
-    if (await cacheHasIndex(preferred)) return preferred;
+  for (const candidate of preferred) {
+    if (!candidate || candidate === CURRENT_CACHE) continue;
+    if (!available.includes(candidate)) continue;
+    if (await cacheHasIndex(candidate)) return candidate;
   }
 
   for (const candidate of available) {
@@ -215,13 +337,13 @@ async function markCandidateActive() {
   }
 
   return writeState({
-    app: APP_ID,
+    ...previousState,
     release: RELEASE,
-    dataSchema: DATA_SCHEMA,
     activeCache: CURRENT_CACHE,
     previousCache,
     lastHealthyCache: previousState.lastHealthyCache || previousCache || null,
     failedCache: null,
+    rollbackReason: null,
     probation: true,
     bootFailures: 0,
     bootStartedAt: 0,
@@ -230,13 +352,13 @@ async function markCandidateActive() {
 }
 
 async function rollbackIfNeeded(state, reason = "boot-failed") {
-  let fallback = state?.previousCache || null;
+  let fallback = state?.previousCache || state?.lastHealthyCache || null;
 
-  if (!fallback || !(await cacheHasIndex(fallback))) {
+  if (!fallback || fallback === CURRENT_CACHE || !(await cacheHasIndex(fallback))) {
     fallback = await choosePreviousCache(state || {});
   }
 
-  if (!fallback || !(await cacheHasIndex(fallback))) {
+  if (!fallback || fallback === CURRENT_CACHE || !(await cacheHasIndex(fallback))) {
     return state;
   }
 
@@ -246,6 +368,7 @@ async function rollbackIfNeeded(state, reason = "boot-failed") {
     previousCache: fallback,
     failedCache: CURRENT_CACHE,
     probation: false,
+    bootStartedAt: 0,
     rollbackReason: reason,
     rolledBackAt: new Date().toISOString()
   });
@@ -324,25 +447,32 @@ function escapeHtml(value) {
 async function statusResponse() {
   const state = await readState();
   const cacheNames = await caches.keys();
-  const activeHealthy = Boolean(
+  const currentHealthy = Boolean(
+    state.activeCache === CURRENT_CACHE &&
+    state.lastHealthyCache === CURRENT_CACHE &&
+    state.probation === false &&
+    (await cacheHasIndex(CURRENT_CACHE))
+  );
+  const rolledBack = Boolean(
+    state.failedCache === CURRENT_CACHE &&
     state.activeCache &&
     state.activeCache !== CURRENT_CACHE &&
+    state.probation === false &&
     (await cacheHasIndex(state.activeCache))
   );
-  const rollbackPassed = Boolean(
-    activeHealthy &&
-    state.failedCache === CURRENT_CACHE &&
-    state.rollbackReason === ROLLBACK_REASON &&
-    state.probation === false
-  );
 
-  const title = rollbackPassed
-    ? "TEST RÉUSSI — retour automatique validé"
-    : "TEST EN COURS OU À VÉRIFIER";
+  const title = currentHealthy
+    ? "FOUNDATION.8 SAINE — mise à jour validée"
+    : rolledBack
+      ? "RETOUR AUTOMATIQUE — version précédente restaurée"
+      : "MISE À JOUR EN COURS OU À VÉRIFIER";
 
+  const result = currentHealthy ? "HEALTHY" : rolledBack ? "ROLLBACK" : "PENDING";
   const details = {
-    testRelease: RELEASE,
-    result: rollbackPassed ? "PASS" : "PENDING",
+    release: RELEASE,
+    result,
+    scopePath: SCOPE_PATH,
+    scopeId: SCOPE_ID,
     activeCache: state.activeCache || null,
     previousCache: state.previousCache || null,
     lastHealthyCache: state.lastHealthyCache || null,
@@ -350,7 +480,8 @@ async function statusResponse() {
     rollbackReason: state.rollbackReason || null,
     probation: state.probation,
     bootFailures: state.bootFailures,
-    caches: cacheNames
+    migratedFromLegacy: state.migratedFromLegacy || null,
+    caches: cacheNames.filter(name => name === META_CACHE || isAppCache(name))
   };
 
   const html = `<!doctype html>
@@ -358,19 +489,25 @@ async function statusResponse() {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Clair V8 — statut rollback</title>
+<title>Clair V8 — statut foundation.8</title>
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; padding: 32px; background: #f5f7f9; color: #173042; }
-  .card { max-width: 760px; margin: 40px auto; background: white; border-radius: 18px; padding: 28px; box-shadow: 0 10px 35px rgba(0,0,0,.08); }
+  .card { max-width: 800px; margin: 40px auto; background: white; border-radius: 18px; padding: 28px; box-shadow: 0 10px 35px rgba(0,0,0,.08); }
   h1 { font-size: 24px; margin: 0 0 18px; }
-  .ok { font-weight: 700; font-size: 18px; }
+  .lead { font-weight: 700; font-size: 18px; line-height: 1.45; }
   pre { white-space: pre-wrap; background: #eef3f6; padding: 18px; border-radius: 12px; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
   <div class="card">
     <h1>${escapeHtml(title)}</h1>
-    <p class="ok">${rollbackPassed ? "Foundation.7 a échoué volontairement et Clair Repas est revenu sur la dernière version saine." : "Le test n’a pas encore confirmé le retour automatique."}</p>
+    <p class="lead">${escapeHtml(
+      currentHealthy
+        ? "La fondation stable est active. Les caches sont désormais isolés par application et par chemin, avec une version saine précédente conservée comme secours."
+        : rolledBack
+          ? "La candidate a été refusée et Clair Repas sert automatiquement la dernière version saine."
+          : "Le navigateur n’a pas encore terminé la validation de la nouvelle fondation."
+    )}</p>
     <pre>${escapeHtml(JSON.stringify(details, null, 2))}</pre>
   </div>
 </body>
@@ -387,6 +524,7 @@ async function statusResponse() {
 self.addEventListener("install", event => {
   event.waitUntil(
     (async () => {
+      await migrateLegacyFallback();
       await buildCandidateCache();
       await self.skipWaiting();
     })()
@@ -396,12 +534,8 @@ self.addEventListener("install", event => {
 self.addEventListener("activate", event => {
   event.waitUntil(
     (async () => {
-      let state = await markCandidateActive();
-
-      if (ROLLBACK_SELF_TEST) {
-        state = await rollbackIfNeeded(state, ROLLBACK_REASON);
-      }
-
+      await migrateLegacyFallback();
+      await markCandidateActive();
       await self.clients.claim();
     })()
   );
@@ -483,6 +617,7 @@ self.addEventListener("message", event => {
           if (
             client &&
             "navigate" in client &&
+            rolled?.activeCache &&
             rolled.activeCache !== CURRENT_CACHE
           ) {
             await client.navigate(client.url);
