@@ -1,11 +1,13 @@
 {
   "platform": "Clair V8",
   "app": "clair-repas",
-  "foundationVersion": "8.0.0-foundation.5",
+  "foundationVersion": "8.0.0-foundation.8",
   "productVersion": "7.5",
   "dataSchema": 2,
-  "channel": "foundation",
-  "publishedAt": "2026-08-16",
+  "channel": "foundation-lab-stable",
+  "publishedAt": "2026-08-17",
   "updatePolicy": "atomic-with-rollback",
-  "personalDataPolicy": "preserve-and-snapshot"
+  "personalDataPolicy": "preserve-and-snapshot",
+  "cacheIsolation": "app-and-scope",
+  "snapshotIsolation": "app-and-scope"
 }

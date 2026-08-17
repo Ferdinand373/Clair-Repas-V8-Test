@@ -3,13 +3,34 @@
 
   const script = document.currentScript;
   const APP_ID = script?.dataset?.clairApp || 'clair';
-  const RELEASE = script?.dataset?.clairRelease || '8.0.0-foundation.1';
+  const RELEASE = script?.dataset?.clairRelease || '8.0.0-foundation.8';
   const DATA_SCHEMA = Number(script?.dataset?.clairSchema || 1);
-  const DB_NAME = 'clair-v8-personal';
   const DB_VERSION = 1;
   const STORE = 'snapshots';
   const BOOT_TIMEOUT_MS = 15000;
   const READY_STABLE_MS = 900;
+
+  function fnv1a(text) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i += 1) {
+      h ^= text.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(16).padStart(8, '0');
+  }
+
+  function appScopePath() {
+    try {
+      const url = new URL('.', location.href);
+      return url.pathname;
+    } catch (_) {
+      return location.pathname || '/';
+    }
+  }
+
+  const SCOPE_PATH = appScopePath();
+  const SCOPE_ID = fnv1a(SCOPE_PATH);
+  const DB_NAME = `clair-v8-personal-${APP_ID}-${SCOPE_ID}`;
 
   const appConfig = {
     'clair-repas': {
@@ -26,6 +47,7 @@
       }
     }
   };
+
   const config = appConfig[APP_ID] || {
     ready: () => document.readyState !== 'loading',
     personalKey: () => false
@@ -57,9 +79,11 @@
         const key = localStorage.key(i);
         if (key && config.personalKey(key)) current.push(key);
       }
+
       for (const key of current) {
         if (!(key in values)) localStorage.removeItem(key);
       }
+
       for (const [key, value] of Object.entries(values)) {
         if (config.personalKey(key)) localStorage.setItem(key, String(value));
       }
@@ -69,21 +93,14 @@
     }
   }
 
-  function fnv1a(text) {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < text.length; i += 1) {
-      h ^= text.charCodeAt(i);
-      h = Math.imul(h, 0x01000193);
-    }
-    return (h >>> 0).toString(16).padStart(8, '0');
-  }
-
   function makeRecord(kind, values) {
     const payload = {
       app: APP_ID,
       kind,
       release: RELEASE,
       dataSchema: DATA_SCHEMA,
+      scopePath: SCOPE_PATH,
+      scopeId: SCOPE_ID,
       capturedAt: new Date().toISOString(),
       values
     };
@@ -95,10 +112,14 @@
     return new Promise((resolve, reject) => {
       if (!('indexedDB' in window)) return reject(new Error('indexeddb-unavailable'));
       const request = indexedDB.open(DB_NAME, DB_VERSION);
+
       request.onupgradeneeded = () => {
         const db = request.result;
-        if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'id' });
+        if (!db.objectStoreNames.contains(STORE)) {
+          db.createObjectStore(STORE, { keyPath: 'id' });
+        }
       };
+
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error || new Error('indexeddb-open-failed'));
     });
@@ -107,6 +128,7 @@
   async function putSnapshot(kind, values = collectPersonalData()) {
     const record = makeRecord(kind, values);
     record.id = `${APP_ID}:${kind}`;
+
     try {
       const db = await openDb();
       await new Promise((resolve, reject) => {
@@ -145,6 +167,7 @@
         app: APP_ID,
         release: RELEASE,
         dataSchema: DATA_SCHEMA,
+        scopeId: SCOPE_ID,
         ...extra
       });
     } catch (_) {}
@@ -152,7 +175,11 @@
 
   function sameOriginFilename(filename) {
     if (!filename) return false;
-    try { return new URL(filename, location.href).origin === location.origin; } catch (_) { return false; }
+    try {
+      return new URL(filename, location.href).origin === location.origin;
+    } catch (_) {
+      return false;
+    }
   }
 
   function isFatalErrorEvent(event) {
@@ -165,8 +192,9 @@
     if (bootResolved) return;
     bootResolved = true;
     fatalError = { reason, detail, at: new Date().toISOString() };
-    // La photo des données a été prise avant l'exécution de l'application.
-    // En cas d'échec de démarrage, on la restaure avant de revenir au code précédent.
+
+    // La photo des données est prise avant le démarrage de l'application.
+    // En cas d'échec, on la restaure avant le retour au code précédent.
     restorePersonalData(prebootData);
     await putSnapshot('recovered', prebootData);
     post('CLAIR_V8_BOOT_FAIL', { reason, detail });
@@ -190,30 +218,48 @@
 
   async function confirmHealthyBoot() {
     const started = Date.now();
+
     while (!bootResolved && Date.now() - started < BOOT_TIMEOUT_MS) {
       let ready = false;
-      try { ready = config.ready(); } catch (_) {}
+      try {
+        ready = config.ready();
+      } catch (_) {}
+
       if (ready) {
         await new Promise(resolve => setTimeout(resolve, READY_STABLE_MS));
         if (bootResolved) return;
+
         bootResolved = true;
         const healthy = collectPersonalData();
         await putSnapshot('healthy', healthy);
-        post('CLAIR_V8_BOOT_OK', { fingerprint: makeRecord('healthy', healthy).fingerprint });
+        post('CLAIR_V8_BOOT_OK', {
+          fingerprint: makeRecord('healthy', healthy).fingerprint
+        });
         return;
       }
+
       await new Promise(resolve => setTimeout(resolve, 180));
     }
-    if (!bootResolved) await failBoot('boot-timeout', `Interface non prête après ${BOOT_TIMEOUT_MS} ms`);
+
+    if (!bootResolved) {
+      await failBoot('boot-timeout', `Interface non prête après ${BOOT_TIMEOUT_MS} ms`);
+    }
   }
+
   confirmHealthyBoot();
 
   window.ClairV8 = Object.freeze({
     app: APP_ID,
     release: RELEASE,
     dataSchema: DATA_SCHEMA,
-    listPersonalKeys() { return Object.keys(collectPersonalData()).sort(); },
-    snapshot(kind = 'manual') { return putSnapshot(kind); },
+    scopePath: SCOPE_PATH,
+    scopeId: SCOPE_ID,
+    listPersonalKeys() {
+      return Object.keys(collectPersonalData()).sort();
+    },
+    snapshot(kind = 'manual') {
+      return putSnapshot(kind);
+    },
     async restoreLatest() {
       const record = await getSnapshot('healthy') || await getSnapshot('preboot');
       return Boolean(record?.values && restorePersonalData(record.values));
@@ -222,7 +268,15 @@
       return JSON.stringify(makeRecord('export', collectPersonalData()), null, 2);
     },
     getStatus() {
-      return { app: APP_ID, release: RELEASE, dataSchema: DATA_SCHEMA, bootResolved, fatalError };
+      return {
+        app: APP_ID,
+        release: RELEASE,
+        dataSchema: DATA_SCHEMA,
+        scopePath: SCOPE_PATH,
+        scopeId: SCOPE_ID,
+        bootResolved,
+        fatalError
+      };
     }
   });
 })();
