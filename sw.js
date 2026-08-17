@@ -102,10 +102,14 @@ async function choosePreviousCache(state = {}) {
   const names = await caches.keys();
   const available = names.filter(name => isAppCache(name) && name !== CURRENT_CACHE);
   for (const preferred of [state.activeCache, state.lastHealthyCache, state.previousCache]) {
+  if (preferred && !(await cacheHasIndex(preferred))) continue;
     if (preferred && preferred !== CURRENT_CACHE && available.includes(preferred)) return preferred;
   }
   // Avant V8, le service worker stable ne conservait normalement qu'un seul cache.
-  return available.length ? available[available.length - 1] : null;
+  for (const cadidate of available) { 
+  if (await cacheHasIndex(candidate)) return candidate; 
+  }  
+  return null;
 }
 
 async function cacheHasIndex(cacheName) {
