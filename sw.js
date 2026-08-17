@@ -106,7 +106,7 @@ async function choosePreviousCache(state = {}) {
     if (preferred && preferred !== CURRENT_CACHE && available.includes(preferred)) return preferred;
   }
   // Avant V8, le service worker stable ne conservait normalement qu'un seul cache.
-  for (const cadidate of available) { 
+  for (const candidate of available) { 
   if (await cacheHasIndex(candidate)) return candidate; 
   }  
   return null;
