@@ -13,7 +13,7 @@
 
   const appConfig = {
     'clair-repas': {
-      ready: () => Boolean(document.querySelector('#newPlan, .planning-card')),
+      ready: () => document.readyState === 'complete',
       personalKey: (key) => /^cr[A-Za-z0-9_.-]+$/.test(key) && key !== 'crHealthProbeV73'
     },
     'clair-courses': {
