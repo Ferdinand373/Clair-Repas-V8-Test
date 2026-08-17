@@ -7,7 +7,7 @@
  * applicatives sont gérées ici dans Cache Storage.
  */
 const APP_ID = "clair-repas";
-const RELEASE = "8.0.0-foundation.3";
+const RELEASE = "8.0.0-foundation.4";
 const DATA_SCHEMA = 2;
 const CACHE_PREFIX = "clair-repas-";
 const CURRENT_CACHE = `${CACHE_PREFIX}app-${RELEASE}`;
