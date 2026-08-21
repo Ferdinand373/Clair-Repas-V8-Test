@@ -15,7 +15,7 @@ const APP_ID = "clair-repas";
 const RELEASE = "8.0.0-foundation.9";
 const FOUNDATION_LABEL = RELEASE.slice(RELEASE.lastIndexOf("-") + 1).toUpperCase();
 const DATA_SCHEMA = 2;
-const CORE_REVISION = "sha256:007f2266d36a329fffdd7c8a8c34cb9c2e5b1a7eddab88556677659ecfbc7122";
+const CORE_REVISION = "sha256:77d4b99c04ac50f8f265f3850dc1130b94e77661464415cf430d6a5d7436311e";
 const BOOT_GRACE_MS = 18000;
 
 function fnv1a(text) {
@@ -47,16 +47,19 @@ const CORE_FILES = [
   "./manifest.webmanifest",
   "./icon-192.png",
   "./icon-512.png",
+  "./v8/clair-sync.js",
   "./v8/clair-foundation.js",
   "./v8/version.json"
 ];
+const ROLLBACK_CORE_FILES = CORE_FILES.filter(path => path !== "./v8/clair-sync.js");
 const CORE_DIGESTS = Object.freeze({
-  "./": "sha256:a2ed5e9ed8a51c60afa1642a02f433a5f173605de9abfb075c7130f8a02f42e5",
-  "./index.html": "sha256:a2ed5e9ed8a51c60afa1642a02f433a5f173605de9abfb075c7130f8a02f42e5",
+  "./": "sha256:0bf3158094bcf14a1835a58f5236602070219ca90306d4d8a48dbb4396c03213",
+  "./index.html": "sha256:0bf3158094bcf14a1835a58f5236602070219ca90306d4d8a48dbb4396c03213",
   "./manifest.webmanifest": "sha256:49b30612587c379d6bb8c6d9ade4e299ff244b41f0bd03e2fcca0a5495834e2a",
   "./icon-192.png": "sha256:8d0d516fdcb7d76a40df62dc92d4f312a1557b9e105917026780e465c32fa9f8",
   "./icon-512.png": "sha256:334f3158730e33ad8232ea229a39f9193b45274f1a72b2f55467b1e625924f70",
-  "./v8/clair-foundation.js": "sha256:12a49a4b5c569b5bd3ab96c9faaf0b022e8919d67c10a12172f5d5867b48d3cb",
+  "./v8/clair-sync.js": "sha256:004f4482c02dec7f8857b6abd576567b6ab45e7cde5a5a674d839be76ae9ed4e",
+  "./v8/clair-foundation.js": "sha256:09397ead325b92a28a005747131dd07d8419f3ffbe84fec6ff515feef69b7f36",
   "./v8/version.json": "sha256:8ce6d59b9f3a56cff854b1098cadec650b087c71a69c7a34b8738fa5c4022aaa"
 });
 
@@ -78,12 +81,31 @@ async function cacheExists(cacheName) {
   return names.includes(cacheName);
 }
 
-async function cacheHasCore(cacheName) {
+async function requiredCoreFiles(cacheName, cache) {
+  if (cacheName === CURRENT_CACHE) return CORE_FILES;
+
+  // Les caches Foundation.8 ne contiennent pas encore Sync. Les candidats
+  // postérieurs qui l'injectent doivent en revanche conserver ce fichier pour
+  // rester des fallbacks hors ligne valides.
+  try {
+    const shell =
+      (await cache.match(appIndexUrl())) ||
+      (await cache.match(appRootUrl()));
+    if (!shell) return ROLLBACK_CORE_FILES;
+    const html = await shell.clone().text();
+    return html.includes("data-clair-v8-sync") ? CORE_FILES : ROLLBACK_CORE_FILES;
+  } catch (_) {
+    return CORE_FILES;
+  }
+}
+
+async function cacheHasCore(cacheName, requiredFiles = null) {
   if (!cacheName) return false;
   try {
     if (!(await cacheExists(cacheName))) return false;
     const cache = await caches.open(cacheName);
-    for (const path of CORE_FILES) {
+    const files = requiredFiles || await requiredCoreFiles(cacheName, cache);
+    for (const path of files) {
       const url = new URL(path, self.registration.scope).toString();
       if (!(await cache.match(url, { ignoreSearch: true }))) return false;
     }
@@ -227,8 +249,16 @@ async function migrateLegacyFallback() {
   return state;
 }
 
+function syncTag() {
+  return `<script src="./v8/clair-sync.js" data-clair-v8-sync data-clair-app="${APP_ID}" data-clair-release="${RELEASE}" data-clair-schema="${DATA_SCHEMA}" data-clair-core="${CORE_REVISION}"></script>`;
+}
+
 function foundationTag() {
   return `<script src="./v8/clair-foundation.js" data-clair-v8-foundation data-clair-app="${APP_ID}" data-clair-release="${RELEASE}" data-clair-schema="${DATA_SCHEMA}" data-clair-core="${CORE_REVISION}"></script>`;
+}
+
+function runtimeTags() {
+  return `${syncTag()}\n${foundationTag()}`;
 }
 
 function responseInit(response) {
@@ -242,16 +272,21 @@ function responseInit(response) {
   };
 }
 
-async function injectFoundation(response) {
+async function injectRuntime(response) {
   const text = await response.text();
-  if (text.includes("data-clair-v8-foundation")) {
+  const hasSync = text.includes("data-clair-v8-sync");
+  const hasFoundation = text.includes("data-clair-v8-foundation");
+  if (hasSync !== hasFoundation) {
+    throw new Error("V8 install: incomplete runtime bootstrap in HTML");
+  }
+  if (hasSync && hasFoundation) {
     return new Response(text, responseInit(response));
   }
 
-  const tag = foundationTag();
+  const tags = runtimeTags();
   const html = /<head(?:\s[^>]*)?>/i.test(text)
-    ? text.replace(/<head(?:\s[^>]*)?>/i, match => `${match}\n${tag}`)
-    : `${tag}\n${text}`;
+    ? text.replace(/<head(?:\s[^>]*)?>/i, match => `${match}\n${tags}`)
+    : `${tags}\n${text}`;
 
   return new Response(html, responseInit(response));
 }
@@ -316,7 +351,7 @@ async function fetchRequired(path) {
   }
 
   if (path === "./" || path === "./index.html") {
-    return injectFoundation(response);
+    return injectRuntime(response);
   }
 
   return response;

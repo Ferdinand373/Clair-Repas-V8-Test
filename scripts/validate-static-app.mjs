@@ -9,6 +9,7 @@ import { TextDecoder, TextEncoder } from "node:util";
 import vm from "node:vm";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const FOUNDATION_8_INDEX_BLOB = "a591a41afc633f1058a94eeec7e8c2e01cedc6da";
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const successes = [];
 const failures = [];
@@ -88,6 +89,11 @@ function coreDigest(coreFiles) {
   return "sha256:" + hash.digest("hex");
 }
 
+function gitBlobSha(content) {
+  const header = Buffer.from("blob " + content.length + "\0", "utf8");
+  return createHash("sha1").update(header).update(content).digest("hex");
+}
+
 async function check(name, callback) {
   try {
     const detail = await callback();
@@ -99,6 +105,7 @@ async function check(name, callback) {
 
 const indexHtml = readUtf8("index.html");
 const serviceWorker = readUtf8("sw.js");
+const personalSync = readUtf8("v8/clair-sync.js");
 const foundation = readUtf8("v8/clair-foundation.js");
 const manifest = JSON.parse(readUtf8("manifest.webmanifest"));
 const version = JSON.parse(readUtf8("v8/version.json"));
@@ -127,6 +134,7 @@ await check("Required repository files", () => {
     "manifest.webmanifest",
     "icon-192.png",
     "icon-512.png",
+    "v8/clair-sync.js",
     "v8/clair-foundation.js",
     "v8/version.json"
   ];
@@ -143,6 +151,7 @@ await check("UTF-8 and merge-conflict safety", () => {
     "manifest.webmanifest",
     "refresh.text",
     "deploy-trigger.txt",
+    "v8/clair-sync.js",
     "v8/clair-foundation.js",
     "v8/version.json"
   ];
@@ -159,43 +168,62 @@ await check("UTF-8 and merge-conflict safety", () => {
 
 await check("JavaScript syntax", () => {
   new vm.Script(serviceWorker, { filename: "sw.js" });
+  new vm.Script(personalSync, { filename: "v8/clair-sync.js" });
   new vm.Script(foundation, { filename: "v8/clair-foundation.js" });
   assert.ok(inlineScripts.length > 0, "No inline application script found");
   inlineScripts.forEach((source, index) => {
     new vm.Script(source, { filename: "index.html:inline-" + (index + 1) + ".js" });
   });
-  return inlineScripts.length + 2 + " scripts";
+  return inlineScripts.length + 3 + " scripts";
 });
 
 await check("Release metadata consistency", () => {
   const appId = stringConstant(serviceWorker, "APP_ID");
   const release = stringConstant(serviceWorker, "RELEASE");
   const schema = numberConstant(serviceWorker, "DATA_SCHEMA");
+  const syncRelease = personalSync.match(/clairRelease\s*\|\|\s*(["'])(.*?)\1/);
+  const syncSchema = personalSync.match(/clairSchema\s*\|\|\s*(\d+)/);
   const foundationRelease = foundation.match(/clairRelease\s*\|\|\s*(["'])(.*?)\1/);
   const foundationSchema = foundation.match(/clairSchema\s*\|\|\s*(\d+)/);
   const productVersion = stringConstant(indexHtml, "CR_APP_VERSION");
   const productSchema = numberConstant(indexHtml, "CR_DATA_SCHEMA_VERSION");
   const markerVersion = refreshMarker.match(/Clair Repas V(\d+(?:\.\d+){1,2})/i);
 
+  assert.ok(syncRelease, "Missing personal Sync release fallback");
+  assert.ok(syncSchema, "Missing personal Sync schema fallback");
   assert.ok(foundationRelease, "Missing Foundation release fallback");
   assert.ok(foundationSchema, "Missing Foundation schema fallback");
   assert.ok(markerVersion, "Missing product version in refresh.text");
   assert.equal(version.app, appId);
   assert.equal(version.foundationVersion, release);
+  assert.equal(syncRelease[2], release);
   assert.equal(foundationRelease[2], release);
   assert.equal(version.dataSchema, schema);
+  assert.equal(Number(syncSchema[1]), schema);
   assert.equal(Number(foundationSchema[1]), schema);
   assert.equal(productSchema, schema);
   assert.equal(version.productVersion, productVersion);
   assert.equal(markerVersion[1], productVersion);
   assert.match(version.publishedAt, /^\d{4}-\d{2}-\d{2}$/);
-  assert.match(serviceWorker, /data-clair-core="\$\{CORE_REVISION\}"/);
+  assert.equal((serviceWorker.match(/data-clair-core="\$\{CORE_REVISION\}"/g) || []).length, 2);
+  assert.match(personalSync, /protocol:\s*'clair-personal-sync\/v1'/);
   assert.match(foundation, /coreRevision:\s*CORE_REVISION/);
   assert.match(
     serviceWorker,
     /data\.release === RELEASE && data\.coreRevision === CORE_REVISION/
   );
   return release + " / product " + productVersion;
+});
+
+await check("Foundation.8 application shell identity", () => {
+  const canonicalIndex = normalizedCoreContent("index.html");
+  assert.equal(
+    gitBlobSha(canonicalIndex),
+    FOUNDATION_8_INDEX_BLOB,
+    "index.html must remain the exact Foundation.8 application shell"
+  );
+  assert.doesNotMatch(indexHtml, /data-clair-v8-(?:sync|foundation)/);
+  return "index.html blob " + FOUNDATION_8_INDEX_BLOB.slice(0, 12);
 });
 
 await check("PWA manifest and icons", () => {
@@ -240,6 +268,7 @@ await check("Precache completeness and immutable revision", () => {
     "./manifest.webmanifest",
     "./icon-192.png",
     "./icon-512.png",
+    "./v8/clair-sync.js",
     "./v8/clair-foundation.js",
     "./v8/version.json"
   ]) {
@@ -262,6 +291,16 @@ await check("Precache completeness and immutable revision", () => {
     serviceWorker,
     /const CURRENT_CACHE\s*=\s*[^;]*CORE_REVISION/,
     "Cache identity must include CORE_REVISION"
+  );
+  assert.match(
+    serviceWorker,
+    /const ROLLBACK_CORE_FILES\s*=\s*CORE_FILES\.filter\(path => path !== "\.\/v8\/clair-sync\.js"\)/,
+    "Foundation.8 fallback must not require clair-sync.js"
+  );
+  assert.match(
+    serviceWorker,
+    /html\.includes\("data-clair-v8-sync"\) \? CORE_FILES : ROLLBACK_CORE_FILES/,
+    "Post-Sync fallbacks must retain clair-sync.js"
   );
   return coreFiles.length + " URLs, " + revision.slice(0, 19);
 });
@@ -294,6 +333,7 @@ await check("Service-worker registration and full-cache validation", async () =>
   );
   assert.deepEqual([...handlers.keys()].sort(), ["activate", "fetch", "install", "message"]);
 
+  let cacheNames = ["legacy"];
   let missingAsset = null;
   const cacheContext = {
     self: fakeSelf,
@@ -309,12 +349,20 @@ await check("Service-worker registration and full-cache validation", async () =>
     TextEncoder,
     caches: {
       async keys() {
-        return ["candidate"];
+        return cacheNames;
       },
-      async open() {
+      async open(cacheName) {
         return {
           async match(request) {
-            return missingAsset && String(request).includes(missingAsset) ? null : { ok: true };
+            const url = String(request);
+            if (missingAsset && url.includes(missingAsset)) return null;
+            if (url.endsWith("/index.html") || url.endsWith("/app/")) {
+              const bootstrap = cacheName === "legacy"
+                ? "<script data-clair-v8-foundation></script>"
+                : "<script data-clair-v8-sync></script><script data-clair-v8-foundation></script>";
+              return new Response("<head>" + bootstrap + "</head>");
+            }
+            return new Response("asset");
           }
         };
       }
@@ -323,13 +371,31 @@ await check("Service-worker registration and full-cache validation", async () =>
   vm.runInNewContext(
     serviceWorker +
       "\n;globalThis.__cacheHasCore = cacheHasCore;" +
+      "\n;globalThis.__currentCache = CURRENT_CACHE;" +
       "\n;globalThis.__validateCoreDigest = validateCoreDigest;",
     cacheContext,
     { filename: "sw.js:cache-smoke", timeout: 1000 }
   );
-  assert.equal(await cacheContext.__cacheHasCore("candidate"), true);
+  cacheNames = [cacheContext.__currentCache, "legacy", "future"];
+  assert.equal(await cacheContext.__cacheHasCore(cacheContext.__currentCache), true);
+  assert.equal(await cacheContext.__cacheHasCore("legacy"), true);
+  assert.equal(await cacheContext.__cacheHasCore("future"), true);
+  missingAsset = "clair-sync.js";
+  assert.equal(await cacheContext.__cacheHasCore(cacheContext.__currentCache), false);
+  assert.equal(
+    await cacheContext.__cacheHasCore("legacy"),
+    true,
+    "Foundation.8 fallback must remain valid without clair-sync.js"
+  );
+  assert.equal(
+    await cacheContext.__cacheHasCore("future"),
+    false,
+    "Post-Sync fallback must require clair-sync.js"
+  );
   missingAsset = "manifest.webmanifest";
-  assert.equal(await cacheContext.__cacheHasCore("candidate"), false);
+  assert.equal(await cacheContext.__cacheHasCore(cacheContext.__currentCache), false);
+  assert.equal(await cacheContext.__cacheHasCore("legacy"), false);
+  assert.equal(await cacheContext.__cacheHasCore("future"), false);
 
   const manifestResponse = new Response(readFileSync(rooted("manifest.webmanifest")));
   await cacheContext.__validateCoreDigest("./manifest.webmanifest", manifestResponse);
@@ -377,6 +443,42 @@ await check("Service-worker registration and full-cache validation", async () =>
   await assert.rejects(
     () => fetchContext.__fetchRequired("./manifest.webmanifest"),
     /digest mismatch/
+  );
+
+  const injectionSource = between(
+    serviceWorker,
+    "function syncTag() {",
+    "\nasync function validateVersionManifest"
+  );
+  const injectionContext = {
+    APP_ID: stringConstant(serviceWorker, "APP_ID"),
+    RELEASE: stringConstant(serviceWorker, "RELEASE"),
+    DATA_SCHEMA: numberConstant(serviceWorker, "DATA_SCHEMA"),
+    CORE_REVISION: stringConstant(serviceWorker, "CORE_REVISION"),
+    Headers,
+    Response
+  };
+  vm.runInNewContext(
+    injectionSource + "\n;globalThis.__injectRuntime = injectRuntime;",
+    injectionContext,
+    { filename: "sw.js:runtime-injection-smoke", timeout: 1000 }
+  );
+  const injectedResponse = await injectionContext.__injectRuntime(
+    new Response("<!doctype html><html><head><title>App</title></head><body></body></html>")
+  );
+  const injectedHtml = await injectedResponse.text();
+  const syncPosition = injectedHtml.indexOf("data-clair-v8-sync");
+  const foundationPosition = injectedHtml.indexOf("data-clair-v8-foundation");
+  assert.ok(syncPosition >= 0 && foundationPosition > syncPosition);
+  assert.equal((injectedHtml.match(/data-clair-v8-sync/g) || []).length, 1);
+  assert.equal((injectedHtml.match(/data-clair-v8-foundation/g) || []).length, 1);
+  assert.equal((injectedHtml.match(/data-clair-app="clair-repas"/g) || []).length, 2);
+  await assert.rejects(
+    () =>
+      injectionContext.__injectRuntime(
+        new Response("<head><script data-clair-v8-foundation></script></head>")
+      ),
+    /incomplete runtime bootstrap/
   );
 
   const markCandidateSource = between(
@@ -488,154 +590,11 @@ await check("Literal DOM references", () => {
   return declared.size + " IDs / " + references.length + " references";
 });
 
-await check("Stored-history rendering", () => {
-  assert.equal(
-    [...inlineScripts[0].matchAll(/function\s+escapeHTML\s*\(/g)].length,
-    1,
-    "escapeHTML must have a single runtime declaration"
-  );
-  const escapeSource = between(
-    inlineScripts[0],
-    "function escapeHTML(value){",
-    "let V73_NOTES_RAW"
-  );
-  const helperSource = between(
-    inlineScripts[0],
-    "function parseHistoryDate(value){",
-    "function renderHistory(){"
-  );
-  const renderSource = between(
-    inlineScripts[0],
-    "function renderHistory(){",
-    "function updateLikedButton(){"
-  );
-  const target = { innerHTML: "" };
-  const history = [
-    { date: "not-a-date", plan: [] },
-    {
-      date: "2026-08-21",
-      plan: [
-        {
-          mid: "<img src=x onerror=alert(1)>",
-          eve: "Dîner",
-          midFormat: "dish",
-          eveFormat: "dish"
-        }
-      ]
-    }
-  ];
-  const context = {
-    safeStoredJSON: () => history,
-    $: () => target,
-    normalizeMealStatus: () => "planned",
-    normalizeMealFormat: () => "dish",
-    statusKey: (type) => type + "Status",
-    formatKey: (type) => type + "Format",
-    formatHasStarter: () => false,
-    formatHasDessert: () => false,
-    MEAL_OUTSIDE: "outside",
-    MEAL_LEFTOVERS: "leftovers"
-  };
-  vm.runInNewContext(
-    escapeSource + helperSource + renderSource + "\nrenderHistory();",
-    context,
-    { filename: "index.html:history-smoke", timeout: 1000 }
-  );
-  assert.doesNotMatch(target.innerHTML, /<img/i);
-  assert.match(target.innerHTML, /&lt;img src=x onerror=alert\(1\)&gt;/);
-  assert.doesNotMatch(target.innerHTML, /not-a-date/);
-  return "invalid dates filtered; stored markup escaped";
-});
-
-await check("Legacy recipe-ID migration", () => {
-  const migrationSource = between(
-    inlineScripts[0],
-    "function mergeV39MigratedValue(current,incoming,key=''){",
-    "\nmigrateV39RecipeReferences();"
-  );
-  const originalFavorites = JSON.stringify(["n87", "n89", "e69"]);
-  const originalNotes = JSON.stringify({
-    n87: "note 87",
-    n89: "note 89",
-    e69: "note 69"
-  });
-  const storageValues = new Map([
-    ["crFavMeals", originalFavorites],
-    ["crRecipeNotesV31", originalNotes]
-  ]);
-  let failingKey = null;
-  let failuresRemaining = 0;
-  const localStorage = {
-    getItem(key) {
-      return storageValues.has(key) ? storageValues.get(key) : null;
-    },
-    setItem(key, value) {
-      if (key === failingKey && failuresRemaining > 0) {
-        failuresRemaining -= 1;
-        throw new Error("injected write failure");
-      }
-      storageValues.set(key, String(value));
-    },
-    removeItem(key) {
-      storageValues.delete(key);
-    }
-  };
-  const context = {
-    localStorage,
-    V39_DATA_MIGRATION_KEY: "crRecipeIdMigrationV39",
-    RECIPE_NOTES_KEY: "crRecipeNotesV31",
-    FAVORITES_KEY: "crFavMeals",
-    RECENT_RECIPES_KEY: "crRecentRecipesV25",
-    REACTIONS_KEY: "crRecipeReactionsV3",
-    LEARNING_KEY: "crRecipeLearningV3",
-    V39_RECIPE_ID_MIGRATIONS: Object.freeze({ n87: "n35", n89: "n39", e69: "e25" }),
-    isClairRepasStorageKey: (key) => /^cr/.test(key)
-  };
-  vm.runInNewContext(
-    migrationSource +
-      "\n;globalThis.__migrationResult = migrateV39RecipeReferences();" +
-      "\n;globalThis.__migrate = migrateV39RecipeReferences;" +
-      "\n;globalThis.__prepare = prepareRestoredClairRepasData;",
-    context,
-    { filename: "index.html:migration-smoke", timeout: 1000 }
-  );
-  assert.equal(context.__migrationResult, true);
-  assert.deepEqual(JSON.parse(storageValues.get("crFavMeals")), ["n35", "n39", "e25"]);
-  assert.deepEqual(JSON.parse(storageValues.get("crRecipeNotesV31")), {
-    n35: "note 87",
-    n39: "note 89",
-    e25: "note 69"
-  });
-  assert.equal(storageValues.get("crRecipeIdMigrationV39"), "done");
-
-  const beforeMalformedImport = Object.fromEntries(storageValues);
-  assert.throws(
-    () => context.__prepare({ crPeople: "8", crRecipeNotesV31: "{" }),
-    /Expected property|Unexpected end|JSON/
-  );
-  assert.deepEqual(Object.fromEntries(storageValues), beforeMalformedImport);
-  assert.throws(() => context.__prepare({ crPeople: 8 }), /invalid-value/);
-
-  storageValues.clear();
-  storageValues.set("crFavMeals", originalFavorites);
-  storageValues.set("crRecipeNotesV31", originalNotes);
-  failingKey = "crFavMeals";
-  failuresRemaining = 1;
-  assert.equal(context.__migrate(), false);
-  assert.equal(storageValues.get("crFavMeals"), originalFavorites);
-  assert.equal(storageValues.get("crRecipeNotesV31"), originalNotes);
-  assert.equal(storageValues.has("crRecipeIdMigrationV39"), false);
-
-  failingKey = null;
-  failuresRemaining = 0;
-  storageValues.set("crRecipeIdMigrationV39", "done");
-  assert.equal(context.__migrate(), true);
-  assert.deepEqual(JSON.parse(storageValues.get("crFavMeals")), ["n35", "n39", "e25"]);
-  assert.equal(storageValues.get("crRecipeIdMigrationV39"), "done");
-  return "n87→n35, n89→n39, e69→e25";
-});
-
-await check("Compensating personal-data restore", async () => {
+await check("Direct personal sync isolation", async () => {
+  assert.doesNotMatch(foundation, /\blocalStorage\b/);
+  assert.doesNotMatch(foundation, /personalKeyPolicies|function readPersonalData/);
+  assert.match(personalSync, /\blocalStorage\b/);
+  assert.match(foundation, /const personalSync = resolvePersonalSync\(\)/);
   const readySource = between(
     foundation,
     "function clairRepasReady() {",
@@ -656,11 +615,6 @@ await check("Compensating personal-data restore", async () => {
   readyContext.document.readyState = "loading";
   assert.equal(readyContext.__clairRepasReady(), false);
 
-  const storageSource = between(
-    foundation,
-    "function collectPersonalData() {",
-    "function makeRecord(kind, values) {"
-  );
   const values = new Map([
     ["crA", "old-a"],
     ["crB", "old-b"],
@@ -695,19 +649,58 @@ await check("Compensating personal-data restore", async () => {
     }
   };
   const context = {
+    window: {},
+    document: {
+      currentScript: {
+        dataset: {
+          clairApp: "clair-repas",
+          clairRelease: stringConstant(serviceWorker, "RELEASE"),
+          clairSchema: String(numberConstant(serviceWorker, "DATA_SCHEMA")),
+          clairCore: stringConstant(serviceWorker, "CORE_REVISION")
+        }
+      }
+    },
+    location: { href: "https://example.test/app/index.html", pathname: "/app/" },
+    URL,
     localStorage,
-    config: { personalKey: (key) => /^cr/.test(key) }
   };
   vm.runInNewContext(
-    storageSource +
-      "\n;globalThis.__restorePersonalData = restorePersonalData;" +
-      "\n;globalThis.__capturePersonalData = capturePersonalData;" +
-      "\n;globalThis.__validPersonalData = validPersonalData;",
+    personalSync,
     context,
-    { filename: "v8/clair-foundation.js:storage-smoke", timeout: 1000 }
+    { filename: "v8/clair-sync.js:storage-smoke", timeout: 1000 }
   );
+  const syncApi = context.window.ClairSync;
+  assert.ok(syncApi, "ClairSync API was not published");
+  assert.equal(syncApi.protocol, "clair-personal-sync/v1");
+  assert.deepEqual(Object.fromEntries(Object.entries(syncApi.capture().values)), {
+    crA: "old-a",
+    crB: "old-b"
+  });
 
-  assert.equal(context.__restorePersonalData({ crA: "new-a", crC: "new-c" }), false);
+  const resolverSource = between(
+    foundation,
+    "function resolvePersonalSync() {",
+    "\n  const personalSync ="
+  );
+  const resolverContext = {
+    window: { ClairSync: syncApi },
+    APP_ID: syncApi.app,
+    RELEASE: syncApi.release,
+    CORE_REVISION: syncApi.coreRevision,
+    DATA_SCHEMA: syncApi.dataSchema,
+    SCOPE_PATH: syncApi.scopePath,
+    SCOPE_ID: syncApi.scopeId
+  };
+  vm.runInNewContext(
+    resolverSource + "\n;globalThis.__resolvePersonalSync = resolvePersonalSync;",
+    resolverContext,
+    { filename: "v8/clair-foundation.js:sync-contract-smoke", timeout: 1000 }
+  );
+  assert.equal(resolverContext.__resolvePersonalSync(), syncApi);
+  resolverContext.window.ClairSync = { ...syncApi, coreRevision: "sha256:tampered" };
+  assert.equal(resolverContext.__resolvePersonalSync(), null);
+
+  assert.equal(syncApi.restore({ crA: "new-a", crC: "new-c" }), false);
   assert.deepEqual(Object.fromEntries(values), {
     crA: "old-a",
     crB: "old-b",
@@ -716,19 +709,19 @@ await check("Compensating personal-data restore", async () => {
 
   operation = 0;
   failAt = Number.POSITIVE_INFINITY;
-  assert.equal(context.__restorePersonalData({ crA: "new-a", crC: "new-c" }), true);
+  assert.equal(syncApi.restore({ crA: "new-a", crC: "new-c" }), true);
   assert.deepEqual(Object.fromEntries(values), {
     crA: "new-a",
     crC: "new-c",
     unrelated: "keep"
   });
   const beforeRejectedRestore = Object.fromEntries(values);
-  assert.equal(context.__restorePersonalData(new Map([["crA", "map-value"]])), false);
-  assert.equal(context.__restorePersonalData({ crA: 42 }), false);
+  assert.equal(syncApi.restore(new Map([["crA", "map-value"]])), false);
+  assert.equal(syncApi.restore({ crA: 42 }), false);
   assert.deepEqual(Object.fromEntries(values), beforeRejectedRestore);
 
   readFailuresRemaining = 1;
-  const failedCapture = context.__capturePersonalData();
+  const failedCapture = syncApi.capture();
   assert.equal(failedCapture.ok, false);
   assert.equal(Object.keys(failedCapture.values).length, 0);
 
@@ -793,16 +786,19 @@ await check("Compensating personal-data restore", async () => {
     }
   };
   const quotaContext = {
+    window: {},
+    document: context.document,
+    location: context.location,
+    URL,
     localStorage: quotaStorage,
-    config: { personalKey: (key) => /^cr/.test(key) }
   };
   vm.runInNewContext(
-    storageSource + "\n;globalThis.__restorePersonalData = restorePersonalData;",
+    personalSync,
     quotaContext,
-    { filename: "v8/clair-foundation.js:quota-smoke", timeout: 1000 }
+    { filename: "v8/clair-sync.js:quota-smoke", timeout: 1000 }
   );
   assert.equal(
-    quotaContext.__restorePersonalData({
+    quotaContext.window.ClairSync.restore({
       crA: "a".repeat(1000),
       crC: "c".repeat(4000),
       crD: "d".repeat(1000)
@@ -813,16 +809,11 @@ await check("Compensating personal-data restore", async () => {
     crA: "a".repeat(4000),
     crB: "b".repeat(1000)
   });
-  return "transient and quota failures restore the before-image";
+  return "storage isolated; transient and quota failures restore the before-image";
 });
 
 await check("Compatible newest snapshot selection", () => {
   const hashSource = between(foundation, "function fnv1a(text) {", "function appScopePath() {");
-  const personalValidationSource = between(
-    foundation,
-    "function validPersonalData(values) {",
-    "\n  function replacePersonalData"
-  );
   const snapshotSource = between(
     foundation,
     "function compatibleSnapshot(record) {",
@@ -833,11 +824,17 @@ await check("Compatible newest snapshot selection", () => {
     DATA_SCHEMA: 2,
     SCOPE_PATH: "/app/",
     SCOPE_ID: "scope-id",
-    config: { personalKey: (key) => /^cr/.test(key) }
+    validPersonalData(values) {
+      return (
+        Object.prototype.toString.call(values) === "[object Object]" &&
+        Object.entries(values).every(
+          ([key, value]) => /^cr/.test(key) && typeof value === "string"
+        )
+      );
+    }
   };
   vm.runInNewContext(
     hashSource +
-      personalValidationSource +
       snapshotSource +
       "\n;globalThis.__fnv1a = fnv1a;" +
       "\n;globalThis.__latestCompatibleSnapshot = latestCompatibleSnapshot;",

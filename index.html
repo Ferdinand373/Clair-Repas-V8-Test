@@ -4046,26 +4046,15 @@ async function restoreClairRepasData(file){
     const raw=await file.text();
     const payload=JSON.parse(raw);
     if(!payload||payload.app!=='Clair Repas'||![1,CR_DATA_SCHEMA_VERSION].includes(Number(payload.schemaVersion))||!payload.data||typeof payload.data!=='object')throw new Error('invalid');
-    const restored=prepareRestoredClairRepasData(payload.data);
-    const keys=Object.keys(restored).filter(key=>key!==V39_DATA_MIGRATION_KEY);
+    const keys=Object.keys(payload.data).filter(isClairRepasStorageKey);
     if(!keys.length)throw new Error('empty');
     if(!window.confirm(`Restaurer ${keys.length} éléments de Clair Repas ? Les données actuelles correspondantes seront remplacées.`))return;
-    restored[V6_WELCOME_KEY]='seen';
-    const applied=applyStoragePatch(restored);
-    if(!applied.ok)throw new Error(applied.recovered?'storage':'storage-rollback');
-    V73_FAVORITES_RAW=null;
+    for(const key of keys)localStorage.setItem(key,String(payload.data[key]));
+    localStorage.setItem(V6_WELCOME_KEY,'seen');
     setProductStatus('Sauvegarde restaurée. Clair Repas va se recharger.','success');
     setTimeout(()=>window.location.reload(),350);
   }catch(e){
-    const message=e&&e.message;
-    setProductStatus(
-      message==='storage'
-        ? 'Restauration interrompue, par exemple faute d’espace. Les données précédentes ont été conservées.'
-        : message==='storage-rollback'
-          ? 'Restauration interrompue et récupération locale incomplète. Rechargez Clair Repas avant toute autre modification.'
-          : 'Ce fichier ne semble pas être une sauvegarde Clair Repas valide.',
-      'warning'
-    );
+    setProductStatus('Ce fichier ne semble pas être une sauvegarde Clair Repas valide.','warning');
   }
 }
 function clairRepasVersionFromMarker(value){
@@ -4163,102 +4152,32 @@ function remapV39RecipeData(value,key=''){
   }
   return result;
 }
-const V39_REFERENCE_KEYS=[
-  FAVORITES_KEY,RECENT_RECIPES_KEY,REACTIONS_KEY,LEARNING_KEY,
-  'crMealUsageV19','crCourseUsageV37','crBrowserDiscoveryV35',
-  'crBrowserDiscoveryV34','crBrowserDecksV35','crStateV13','crHistoryV13'
-];
-function migrateV39StorageValues(values){
-  const next={...values};
-  const hasOwn=key=>Object.prototype.hasOwnProperty.call(next,key);
-
-  if(hasOwn(RECIPE_NOTES_KEY)){
-    const notes=JSON.parse(next[RECIPE_NOTES_KEY]);
-    if(!notes||typeof notes!=='object'||Array.isArray(notes))throw new Error('invalid-notes');
-    for(const [oldId,newId] of Object.entries(V39_RECIPE_ID_MIGRATIONS)){
-      if(typeof notes[oldId]!=='string'||!notes[oldId].trim())continue;
-      const oldNote=notes[oldId].trim();
-      const current=typeof notes[newId]==='string'?notes[newId].trim():'';
-      notes[newId]=current&&current!==oldNote?(current+'\n\n'+oldNote).slice(0,2000):oldNote;
-      delete notes[oldId];
-    }
-    next[RECIPE_NOTES_KEY]=JSON.stringify(notes);
-  }
-
-  for(const key of V39_REFERENCE_KEYS){
-    if(!hasOwn(key))continue;
-    next[key]=JSON.stringify(remapV39RecipeData(JSON.parse(next[key])));
-  }
-  next[V39_DATA_MIGRATION_KEY]='done';
-  return next;
-}
-function prepareRestoredClairRepasData(values){
-  if(!values||typeof values!=='object'||Array.isArray(values))throw new Error('invalid-data');
-  const selected={};
-  for(const [key,value] of Object.entries(values)){
-    if(!isClairRepasStorageKey(key))continue;
-    if(typeof value!=='string')throw new Error('invalid-value');
-    selected[key]=value;
-  }
-  if(!Object.keys(selected).some(key=>key!==V39_DATA_MIGRATION_KEY))throw new Error('empty');
-  delete selected[V39_DATA_MIGRATION_KEY];
-  return migrateV39StorageValues(selected);
-}
-function restoreStorageBeforeImage(before){
-  let recovered=true;
-  const entries=Object.entries(before);
-
-  // Retirer d'abord les clés créées par la tentative libère le quota avant de
-  // réécrire les valeurs précédentes, dont on sait que l'ensemble tenait.
-  for(const [key,previous] of entries.filter(([,value])=>value===null)){
-    try{localStorage.removeItem(key)}catch(e){recovered=false}
-  }
-
-  const originals=entries.filter(([,value])=>value!==null).map(([key,value])=>{
-    let current='';
-    try{current=localStorage.getItem(key)||''}catch(e){recovered=false}
-    return{key,value,delta:String(value).length-current.length};
-  }).sort((a,b)=>a.delta-b.delta);
-
-  for(const {key,value} of originals){
-    try{localStorage.setItem(key,value)}catch(e){recovered=false}
-  }
-
-  for(const [key,previous] of entries){
-    try{
-      const current=localStorage.getItem(key);
-      if(current!==previous)recovered=false;
-    }catch(e){recovered=false}
-  }
-  return recovered;
-}
-function applyStoragePatch(values){
-  const before={};
-  try{
-    for(const [key,value] of Object.entries(values)){
-      if(typeof value!=='string')throw new Error('invalid-value');
-      before[key]=localStorage.getItem(key);
-    }
-    for(const [key,value] of Object.entries(values))localStorage.setItem(key,value);
-    return{ok:true,recovered:true};
-  }catch(e){
-    return{ok:false,recovered:restoreStorageBeforeImage(before)};
-  }
-}
 function migrateV39RecipeReferences(){
   try{
-    const marker=localStorage.getItem(V39_DATA_MIGRATION_KEY);
-    const current={};
-    for(const key of [RECIPE_NOTES_KEY,...V39_REFERENCE_KEYS]){
-      const raw=localStorage.getItem(key);
-      if(raw!==null)current[key]=raw;
+    if(localStorage.getItem(V39_DATA_MIGRATION_KEY)==='done')return;
+    const notes=JSON.parse(localStorage.getItem(RECIPE_NOTES_KEY)||'{}');
+    if(notes&&typeof notes==='object'&&!Array.isArray(notes)){
+      for(const [oldId,newId] of Object.entries(V39_RECIPE_ID_MIGRATIONS)){
+        if(typeof notes[oldId]!=='string'||!notes[oldId].trim())continue;
+        const oldNote=notes[oldId].trim();
+        const current=typeof notes[newId]==='string'?notes[newId].trim():'';
+        notes[newId]=current&&current!==oldNote?(current+'\n\n'+oldNote).slice(0,2000):oldNote;
+        delete notes[oldId];
+      }
+      localStorage.setItem(RECIPE_NOTES_KEY,JSON.stringify(notes));
     }
-    const migrated=migrateV39StorageValues(current);
-    const changed=marker!=='done'||Object.entries(migrated).some(([key,value])=>
-      key===V39_DATA_MIGRATION_KEY?marker!==value:current[key]!==value
-    );
-    return changed?applyStoragePatch(migrated).ok:true;
-  }catch(e){return false}
+    const keys=[
+      FAVORITES_KEY,RECENT_RECIPES_KEY,REACTIONS_KEY,LEARNING_KEY,
+      'crMealUsageV19','crCourseUsageV37','crBrowserDiscoveryV35',
+      'crBrowserDiscoveryV34','crBrowserDecksV35','crStateV13','crHistoryV13'
+    ];
+    for(const key of keys){
+      const raw=localStorage.getItem(key);
+      if(!raw)continue;
+      try{localStorage.setItem(key,JSON.stringify(remapV39RecipeData(JSON.parse(raw))))}catch(e){}
+    }
+    localStorage.setItem(V39_DATA_MIGRATION_KEY,'done');
+  }catch(e){}
 }
 migrateV39RecipeReferences();
 function readIdList(key){
@@ -5833,6 +5752,9 @@ let ingredientAssistantResultsReady=false;
 const assistantRecipeMatchCache=new WeakMap();
 const assistantLeftoverTextCache=new WeakMap();
 
+function escapeHTML(value){
+  return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+}
 function assistantPhraseVariants(value){
   const normalized=normalizeSearchText(value);
   if(!normalized)return[];
@@ -7913,23 +7835,12 @@ function saveHistory(){
   localStorage.setItem('crHistoryV13',JSON.stringify(h.slice(0,10)));
   renderHistory();
 }
-function parseHistoryDate(value){
-  if(typeof value!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value))return null;
-  const [year,month,day]=value.split('-').map(Number);
-  const date=new Date(year,month-1,day,12,0,0,0);
-  if(Number.isNaN(date.getTime())||date.getFullYear()!==year||date.getMonth()!==month-1||date.getDate()!==day)return null;
-  return date;
-}
-function validHistoryEntries(value){
-  if(!Array.isArray(value))return[];
-  return value.filter(entry=>entry&&typeof entry==='object'&&!Array.isArray(entry)&&parseHistoryDate(entry.date)&&Array.isArray(entry.plan));
-}
 function renderHistory(){
   const hRaw=safeStoredJSON('crHistoryV13',[]);
-  const h=validHistoryEntries(hRaw).slice(0,5);
+  const h=Array.isArray(hRaw)?hRaw:[];
   if(!h.length){$('historyContent').innerHTML='<div class="empty">Aucun ancien programme pour le moment.</div>';return}
-  $('historyContent').innerHTML=h.map(x=>{
-    const d=parseHistoryDate(x.date);
+  $('historyContent').innerHTML=h.slice(0,5).map(x=>{
+    const d=new Date(x.date+'T12:00:00');
     const date=new Intl.DateTimeFormat('fr-FR',{weekday:'short',day:'numeric',month:'short'}).format(d);
     const mealName=(p,type)=>{
       const status=normalizeMealStatus(p&&p[statusKey(type)]);
@@ -7943,11 +7854,8 @@ function renderHistory(){
       if(formatHasDessert(format)&&p[`${type}Dessert`])parts.push(p[`${type}Dessert`]);
       return parts.join(' + ');
     };
-    const meals=x.plan.slice(0,7)
-      .filter(p=>p&&typeof p==='object'&&!Array.isArray(p))
-      .map((p,i)=>`<strong>J${i+1}</strong> · ${escapeHTML(mealName(p,'mid'))}<br>↳ ${escapeHTML(mealName(p,'eve'))}`)
-      .join('<br>');
-    return `<div class="history-item"><div class="history-date">${escapeHTML(date)}</div><div class="history-meals">${meals}</div></div>`;
+    const meals=(x.plan||[]).map((p,i)=>`<strong>J${i+1}</strong> · ${mealName(p,'mid')}<br>↳ ${mealName(p,'eve')}`).join('<br>');
+    return `<div class="history-item"><div class="history-date">${date}</div><div class="history-meals">${meals}</div></div>`;
   }).join('');
 }
 function updateLikedButton(){
