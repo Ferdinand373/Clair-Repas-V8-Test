@@ -8,3 +8,7 @@
 *.yml text eol=lf
 *.txt text eol=lf
 *.png binary
+
+# Exact vendored Supabase artifact: preserve upstream bytes and hide minified diff noise.
+v8/vendor/supabase-js-2.111.0.js binary
+v8/vendor/supabase-js-2.111.0.LICENSE text eol=lf

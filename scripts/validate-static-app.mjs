@@ -107,6 +107,8 @@ const indexHtml = readUtf8("index.html");
 const serviceWorker = readUtf8("sw.js");
 const personalSync = readUtf8("v8/clair-sync.js");
 const foundation = readUtf8("v8/clair-foundation.js");
+const cloudSync = readUtf8("v8/clair-cloud-sync.js");
+const supabaseVendor = readUtf8("v8/vendor/supabase-js-2.111.0.js");
 const manifest = JSON.parse(readUtf8("manifest.webmanifest"));
 const version = JSON.parse(readUtf8("v8/version.json"));
 const refreshMarker = readUtf8("refresh.text");
@@ -135,6 +137,9 @@ await check("Required repository files", () => {
     "icon-192.png",
     "icon-512.png",
     "v8/clair-sync.js",
+    "v8/clair-cloud-sync.js",
+    "v8/vendor/supabase-js-2.111.0.js",
+    "v8/vendor/supabase-js-2.111.0.LICENSE",
     "v8/clair-foundation.js",
     "v8/version.json"
   ];
@@ -152,6 +157,9 @@ await check("UTF-8 and merge-conflict safety", () => {
     "refresh.text",
     "deploy-trigger.txt",
     "v8/clair-sync.js",
+    "v8/clair-cloud-sync.js",
+    "v8/vendor/supabase-js-2.111.0.js",
+    "v8/vendor/supabase-js-2.111.0.LICENSE",
     "v8/clair-foundation.js",
     "v8/version.json"
   ];
@@ -170,11 +178,15 @@ await check("JavaScript syntax", () => {
   new vm.Script(serviceWorker, { filename: "sw.js" });
   new vm.Script(personalSync, { filename: "v8/clair-sync.js" });
   new vm.Script(foundation, { filename: "v8/clair-foundation.js" });
+  new vm.Script(cloudSync, { filename: "v8/clair-cloud-sync.js" });
+  new vm.Script(supabaseVendor, {
+    filename: "v8/vendor/supabase-js-2.111.0.js"
+  });
   assert.ok(inlineScripts.length > 0, "No inline application script found");
   inlineScripts.forEach((source, index) => {
     new vm.Script(source, { filename: "index.html:inline-" + (index + 1) + ".js" });
   });
-  return inlineScripts.length + 3 + " scripts";
+  return inlineScripts.length + 5 + " scripts";
 });
 
 await check("Release metadata consistency", () => {
@@ -185,6 +197,8 @@ await check("Release metadata consistency", () => {
   const syncSchema = personalSync.match(/clairSchema\s*\|\|\s*(\d+)/);
   const foundationRelease = foundation.match(/clairRelease\s*\|\|\s*(["'])(.*?)\1/);
   const foundationSchema = foundation.match(/clairSchema\s*\|\|\s*(\d+)/);
+  const cloudRelease = cloudSync.match(/clairRelease\s*\|\|\s*(["'])(.*?)\1/);
+  const cloudSchema = cloudSync.match(/clairSchema\s*\|\|\s*(\d+)/);
   const productVersion = stringConstant(indexHtml, "CR_APP_VERSION");
   const productSchema = numberConstant(indexHtml, "CR_DATA_SCHEMA_VERSION");
   const markerVersion = refreshMarker.match(/Clair Repas V(\d+(?:\.\d+){1,2})/i);
@@ -193,20 +207,39 @@ await check("Release metadata consistency", () => {
   assert.ok(syncSchema, "Missing personal Sync schema fallback");
   assert.ok(foundationRelease, "Missing Foundation release fallback");
   assert.ok(foundationSchema, "Missing Foundation schema fallback");
+  assert.ok(cloudRelease, "Missing Cloud Sync release fallback");
+  assert.ok(cloudSchema, "Missing Cloud Sync schema fallback");
   assert.ok(markerVersion, "Missing product version in refresh.text");
   assert.equal(version.app, appId);
   assert.equal(version.foundationVersion, release);
   assert.equal(syncRelease[2], release);
   assert.equal(foundationRelease[2], release);
+  assert.equal(cloudRelease[2], release);
   assert.equal(version.dataSchema, schema);
   assert.equal(Number(syncSchema[1]), schema);
   assert.equal(Number(foundationSchema[1]), schema);
+  assert.equal(Number(cloudSchema[1]), schema);
   assert.equal(productSchema, schema);
   assert.equal(version.productVersion, productVersion);
   assert.equal(markerVersion[1], productVersion);
   assert.match(version.publishedAt, /^\d{4}-\d{2}-\d{2}$/);
-  assert.equal((serviceWorker.match(/data-clair-core="\$\{CORE_REVISION\}"/g) || []).length, 2);
+  assert.equal((serviceWorker.match(/data-clair-core="\$\{CORE_REVISION\}"/g) || []).length, 3);
   assert.match(personalSync, /protocol:\s*'clair-personal-sync\/v1'/);
+  assert.match(cloudSync, /const CLOUD_PROTOCOL = 'clair-cloud-sync\/v1'/);
+  assert.equal(stringConstant(cloudSync, "CLOUD_APP_ID"), "clair-repas-v8-test");
+  assert.equal(stringConstant(cloudSync, "INTEGRATION"), "clair-v8-foundation.9");
+  assert.equal(
+    stringConstant(cloudSync, "SUPABASE_JS_PATH"),
+    "./v8/vendor/supabase-js-2.111.0.js"
+  );
+  assert.match(stringConstant(cloudSync, "SUPABASE_PUBLISHABLE_KEY"), /^sb_publishable_/);
+  assert.doesNotMatch(cloudSync, /service_role|sb_secret_/i);
+  assert.match(supabaseVendor, /realtime-js\/2\.111\.0/);
+  assert.equal(
+    assetDigest("./v8/vendor/supabase-js-2.111.0.js"),
+    "sha256:7396012594aa6d23bb373ebc25d1080bf3672fa847c3713f756520b40fd13453",
+    "Vendored Supabase bundle must remain the exact pinned 2.111.0 artifact"
+  );
   assert.match(foundation, /coreRevision:\s*CORE_REVISION/);
   assert.match(
     serviceWorker,
@@ -222,7 +255,7 @@ await check("Foundation.8 application shell identity", () => {
     FOUNDATION_8_INDEX_BLOB,
     "index.html must remain the exact Foundation.8 application shell"
   );
-  assert.doesNotMatch(indexHtml, /data-clair-v8-(?:sync|foundation)/);
+  assert.doesNotMatch(indexHtml, /data-clair-v8-(?:sync|foundation|cloud-sync)/);
   return "index.html blob " + FOUNDATION_8_INDEX_BLOB.slice(0, 12);
 });
 
@@ -269,7 +302,9 @@ await check("Precache completeness and immutable revision", () => {
     "./icon-192.png",
     "./icon-512.png",
     "./v8/clair-sync.js",
+    "./v8/vendor/supabase-js-2.111.0.js",
     "./v8/clair-foundation.js",
+    "./v8/clair-cloud-sync.js",
     "./v8/version.json"
   ]) {
     assert.ok(coreFiles.includes(expected), "CORE_FILES omits " + expected);
@@ -294,13 +329,18 @@ await check("Precache completeness and immutable revision", () => {
   );
   assert.match(
     serviceWorker,
-    /const ROLLBACK_CORE_FILES\s*=\s*CORE_FILES\.filter\(path => path !== "\.\/v8\/clair-sync\.js"\)/,
-    "Foundation.8 fallback must not require clair-sync.js"
+    /const FOUNDATION_CORE_FILES\s*=\s*LOCAL_SYNC_CORE_FILES\.filter/,
+    "Foundation.8 fallback must retain its historical core set"
   );
   assert.match(
     serviceWorker,
-    /html\.includes\("data-clair-v8-sync"\) \? CORE_FILES : ROLLBACK_CORE_FILES/,
-    "Post-Sync fallbacks must retain clair-sync.js"
+    /if \(hasCloud && hasSync && hasFoundation\) return CORE_FILES/,
+    "Cloud fallbacks must retain the complete cloud runtime"
+  );
+  assert.match(
+    serviceWorker,
+    /if \(hasSync\) return LOCAL_SYNC_CORE_FILES/,
+    "Local-Sync fallbacks must retain clair-sync.js"
   );
   return coreFiles.length + " URLs, " + revision.slice(0, 19);
 });
@@ -359,7 +399,9 @@ await check("Service-worker registration and full-cache validation", async () =>
             if (url.endsWith("/index.html") || url.endsWith("/app/")) {
               const bootstrap = cacheName === "legacy"
                 ? "<script data-clair-v8-foundation></script>"
-                : "<script data-clair-v8-sync></script><script data-clair-v8-foundation></script>";
+                : cacheName === "local-sync"
+                  ? "<script data-clair-v8-sync></script><script data-clair-v8-foundation></script>"
+                  : "<script data-clair-v8-sync></script><script data-clair-v8-foundation></script><script data-clair-v8-cloud-sync></script>";
               return new Response("<head>" + bootstrap + "</head>");
             }
             return new Response("asset");
@@ -376,10 +418,18 @@ await check("Service-worker registration and full-cache validation", async () =>
     cacheContext,
     { filename: "sw.js:cache-smoke", timeout: 1000 }
   );
-  cacheNames = [cacheContext.__currentCache, "legacy", "future"];
+  cacheNames = [cacheContext.__currentCache, "legacy", "local-sync"];
   assert.equal(await cacheContext.__cacheHasCore(cacheContext.__currentCache), true);
   assert.equal(await cacheContext.__cacheHasCore("legacy"), true);
-  assert.equal(await cacheContext.__cacheHasCore("future"), true);
+  assert.equal(await cacheContext.__cacheHasCore("local-sync"), true);
+  missingAsset = "clair-cloud-sync.js";
+  assert.equal(await cacheContext.__cacheHasCore(cacheContext.__currentCache), false);
+  assert.equal(await cacheContext.__cacheHasCore("legacy"), true);
+  assert.equal(await cacheContext.__cacheHasCore("local-sync"), true);
+  missingAsset = "supabase-js-2.111.0.js";
+  assert.equal(await cacheContext.__cacheHasCore(cacheContext.__currentCache), false);
+  assert.equal(await cacheContext.__cacheHasCore("legacy"), true);
+  assert.equal(await cacheContext.__cacheHasCore("local-sync"), true);
   missingAsset = "clair-sync.js";
   assert.equal(await cacheContext.__cacheHasCore(cacheContext.__currentCache), false);
   assert.equal(
@@ -388,14 +438,14 @@ await check("Service-worker registration and full-cache validation", async () =>
     "Foundation.8 fallback must remain valid without clair-sync.js"
   );
   assert.equal(
-    await cacheContext.__cacheHasCore("future"),
+    await cacheContext.__cacheHasCore("local-sync"),
     false,
     "Post-Sync fallback must require clair-sync.js"
   );
   missingAsset = "manifest.webmanifest";
   assert.equal(await cacheContext.__cacheHasCore(cacheContext.__currentCache), false);
   assert.equal(await cacheContext.__cacheHasCore("legacy"), false);
-  assert.equal(await cacheContext.__cacheHasCore("future"), false);
+  assert.equal(await cacheContext.__cacheHasCore("local-sync"), false);
 
   const manifestResponse = new Response(readFileSync(rooted("manifest.webmanifest")));
   await cacheContext.__validateCoreDigest("./manifest.webmanifest", manifestResponse);
@@ -469,10 +519,16 @@ await check("Service-worker registration and full-cache validation", async () =>
   const injectedHtml = await injectedResponse.text();
   const syncPosition = injectedHtml.indexOf("data-clair-v8-sync");
   const foundationPosition = injectedHtml.indexOf("data-clair-v8-foundation");
-  assert.ok(syncPosition >= 0 && foundationPosition > syncPosition);
+  const cloudPosition = injectedHtml.indexOf("data-clair-v8-cloud-sync");
+  assert.ok(
+    syncPosition >= 0 &&
+      foundationPosition > syncPosition &&
+      cloudPosition > foundationPosition
+  );
   assert.equal((injectedHtml.match(/data-clair-v8-sync/g) || []).length, 1);
   assert.equal((injectedHtml.match(/data-clair-v8-foundation/g) || []).length, 1);
-  assert.equal((injectedHtml.match(/data-clair-app="clair-repas"/g) || []).length, 2);
+  assert.equal((injectedHtml.match(/data-clair-v8-cloud-sync/g) || []).length, 1);
+  assert.equal((injectedHtml.match(/data-clair-app="clair-repas"/g) || []).length, 3);
   await assert.rejects(
     () =>
       injectionContext.__injectRuntime(
@@ -594,6 +650,11 @@ await check("Direct personal sync isolation", async () => {
   assert.doesNotMatch(foundation, /\blocalStorage\b/);
   assert.doesNotMatch(foundation, /personalKeyPolicies|function readPersonalData/);
   assert.match(personalSync, /\blocalStorage\b/);
+  assert.match(cloudSync, /sync\.capture\(\)/);
+  assert.match(cloudSync, /sync\.restore\(target\)/);
+  assert.match(cloudSync, /sync\.valid\(\{ \[key\]: '' \}\)/);
+  assert.doesNotMatch(cloudSync, /personalKeyPolicies|function readPersonalData/);
+  assert.doesNotMatch(cloudSync, /app_id:\s*['"]clair-repas['"]/);
   assert.match(foundation, /const personalSync = resolvePersonalSync\(\)/);
   const readySource = between(
     foundation,
