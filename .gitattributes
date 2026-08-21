@@ -1,0 +1,9 @@
+* text=auto
+
+*.html text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.webmanifest text eol=lf
+*.yml text eol=lf
+*.txt text eol=lf
+*.png binary
