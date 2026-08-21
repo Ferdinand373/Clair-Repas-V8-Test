@@ -2,6 +2,7 @@
 <html lang="fr">
 <head>
 <meta charset="utf-8">
+<script src="./v8/clair-test-storage.js" data-clair-v8-test-storage data-clair-storage-app="clair-repas-v8-test"></script>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#dceefa">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -3908,18 +3909,18 @@ function v73RememberCorruptStorage(key,raw){
   if(!V73_RUNTIME.recoveredKeys.includes(key))V73_RUNTIME.recoveredKeys.push(key);
   try{
     let recovery=[];
-    try{recovery=JSON.parse(localStorage.getItem(V73_RECOVERY_KEY)||'[]')}catch(e){recovery=[]}
+    try{recovery=JSON.parse(window.ClairStorage.getItem(V73_RECOVERY_KEY)||'[]')}catch(e){recovery=[]}
     if(!Array.isArray(recovery))recovery=[];
     const snapshot=String(raw).slice(0,12000);
     if(!recovery.some(item=>item&&item.key===key&&item.raw===snapshot)){
       recovery.push({key,raw:snapshot,at:new Date().toISOString()});
-      localStorage.setItem(V73_RECOVERY_KEY,JSON.stringify(recovery.slice(-8)));
+      window.ClairStorage.setItem(V73_RECOVERY_KEY,JSON.stringify(recovery.slice(-8)));
     }
   }catch(e){}
 }
 function safeStoredJSON(key,fallback){
   let raw=null;
-  try{raw=localStorage.getItem(key)}catch(e){return fallback}
+  try{raw=window.ClairStorage.getItem(key)}catch(e){return fallback}
   if(raw===null)return fallback;
   try{return JSON.parse(raw)}catch(e){v73RememberCorruptStorage(key,raw);return fallback}
 }
@@ -3936,7 +3937,7 @@ function v73RecipeDiagnostics(){
 }
 function v73StorageAvailable(){
   const probe='crHealthProbeV73';
-  try{localStorage.setItem(probe,'1');localStorage.removeItem(probe);return true}catch(e){return false}
+  try{window.ClairStorage.setItem(probe,'1');window.ClairStorage.removeItem(probe);return true}catch(e){return false}
 }
 function refreshV73HealthStatus(){
   const recipes=v73RecipeDiagnostics();
@@ -3979,8 +3980,8 @@ const V6_BACKUP_KEYS=[
 function clairRepasBackupKeys(){
   const keys=new Set(V6_BACKUP_KEYS);
   try{
-    for(let index=0;index<localStorage.length;index+=1){
-      const key=localStorage.key(index);
+    for(let index=0;index<window.ClairStorage.length;index+=1){
+      const key=window.ClairStorage.key(index);
       if(key&&/^cr[A-Za-z0-9_.-]+$/.test(key))keys.add(key);
     }
   }catch(e){}
@@ -4009,7 +4010,7 @@ function clairRepasBackupPayload(){
   const data={};
   for(const key of clairRepasBackupKeys()){
     try{
-      const value=localStorage.getItem(key);
+      const value=window.ClairStorage.getItem(key);
       if(value!==null)data[key]=value;
     }catch(e){}
   }
@@ -4049,8 +4050,8 @@ async function restoreClairRepasData(file){
     const keys=Object.keys(payload.data).filter(isClairRepasStorageKey);
     if(!keys.length)throw new Error('empty');
     if(!window.confirm(`Restaurer ${keys.length} éléments de Clair Repas ? Les données actuelles correspondantes seront remplacées.`))return;
-    for(const key of keys)localStorage.setItem(key,String(payload.data[key]));
-    localStorage.setItem(V6_WELCOME_KEY,'seen');
+    for(const key of keys)window.ClairStorage.setItem(key,String(payload.data[key]));
+    window.ClairStorage.setItem(V6_WELCOME_KEY,'seen');
     setProductStatus('Sauvegarde restaurée. Clair Repas va se recharger.','success');
     setTimeout(()=>window.location.reload(),350);
   }catch(e){
@@ -4097,7 +4098,7 @@ async function manualAppUpdateCheck(){
   }
 }
 function closeV6Welcome(openNews=false){
-  localStorage.setItem(V6_WELCOME_KEY,'seen');
+  window.ClairStorage.setItem(V6_WELCOME_KEY,'seen');
   const overlay=$('welcomeV6');
   if(overlay)overlay.hidden=true;
   document.body.classList.remove('browser-open');
@@ -4109,7 +4110,7 @@ function closeV6Welcome(openNews=false){
   }
 }
 function maybeShowV6Welcome(){
-  if(localStorage.getItem(V6_WELCOME_KEY)==='seen')return;
+  if(window.ClairStorage.getItem(V6_WELCOME_KEY)==='seen')return;
   const overlay=$('welcomeV6');
   if(!overlay)return;
   overlay.hidden=false;
@@ -4154,8 +4155,8 @@ function remapV39RecipeData(value,key=''){
 }
 function migrateV39RecipeReferences(){
   try{
-    if(localStorage.getItem(V39_DATA_MIGRATION_KEY)==='done')return;
-    const notes=JSON.parse(localStorage.getItem(RECIPE_NOTES_KEY)||'{}');
+    if(window.ClairStorage.getItem(V39_DATA_MIGRATION_KEY)==='done')return;
+    const notes=JSON.parse(window.ClairStorage.getItem(RECIPE_NOTES_KEY)||'{}');
     if(notes&&typeof notes==='object'&&!Array.isArray(notes)){
       for(const [oldId,newId] of Object.entries(V39_RECIPE_ID_MIGRATIONS)){
         if(typeof notes[oldId]!=='string'||!notes[oldId].trim())continue;
@@ -4164,7 +4165,7 @@ function migrateV39RecipeReferences(){
         notes[newId]=current&&current!==oldNote?(current+'\n\n'+oldNote).slice(0,2000):oldNote;
         delete notes[oldId];
       }
-      localStorage.setItem(RECIPE_NOTES_KEY,JSON.stringify(notes));
+      window.ClairStorage.setItem(RECIPE_NOTES_KEY,JSON.stringify(notes));
     }
     const keys=[
       FAVORITES_KEY,RECENT_RECIPES_KEY,REACTIONS_KEY,LEARNING_KEY,
@@ -4172,17 +4173,17 @@ function migrateV39RecipeReferences(){
       'crBrowserDiscoveryV34','crBrowserDecksV35','crStateV13','crHistoryV13'
     ];
     for(const key of keys){
-      const raw=localStorage.getItem(key);
+      const raw=window.ClairStorage.getItem(key);
       if(!raw)continue;
-      try{localStorage.setItem(key,JSON.stringify(remapV39RecipeData(JSON.parse(raw))))}catch(e){}
+      try{window.ClairStorage.setItem(key,JSON.stringify(remapV39RecipeData(JSON.parse(raw))))}catch(e){}
     }
-    localStorage.setItem(V39_DATA_MIGRATION_KEY,'done');
+    window.ClairStorage.setItem(V39_DATA_MIGRATION_KEY,'done');
   }catch(e){}
 }
 migrateV39RecipeReferences();
 function readIdList(key){
   let values=[];
-  try{values=JSON.parse(localStorage.getItem(key)||'[]')}catch(e){values=[]}
+  try{values=JSON.parse(window.ClairStorage.getItem(key)||'[]')}catch(e){values=[]}
   if(!Array.isArray(values))return[];
   return [...new Set(values.filter(value=>typeof value==='string'))];
 }
@@ -4191,7 +4192,7 @@ let V73_FAVORITES_IDS=[];
 let V73_FAVORITES_SET=new Set();
 function refreshFavoriteCache(){
   let raw='[]';
-  try{raw=localStorage.getItem(FAVORITES_KEY)||'[]'}catch(e){}
+  try{raw=window.ClairStorage.getItem(FAVORITES_KEY)||'[]'}catch(e){}
   if(raw===V73_FAVORITES_RAW)return;
   let values=[];
   try{values=JSON.parse(raw)}catch(e){values=[]}
@@ -4201,7 +4202,7 @@ function refreshFavoriteCache(){
   V73_FAVORITES_RAW=raw;
 }
 function writeIdList(key,values){
-  localStorage.setItem(key,JSON.stringify([...new Set(values)]));
+  window.ClairStorage.setItem(key,JSON.stringify([...new Set(values)]));
   if(key===FAVORITES_KEY)V73_FAVORITES_RAW=null;
 }
 function favoriteIds(){refreshFavoriteCache();return[...V73_FAVORITES_IDS]}
@@ -4222,7 +4223,7 @@ let V73_NOTES_RAW=null;
 let V73_NOTES_MAP={};
 function refreshRecipeNoteCache(){
   let raw='{}';
-  try{raw=localStorage.getItem(RECIPE_NOTES_KEY)||'{}'}catch(e){}
+  try{raw=window.ClairStorage.getItem(RECIPE_NOTES_KEY)||'{}'}catch(e){}
   if(raw===V73_NOTES_RAW)return;
   let values={};
   try{values=JSON.parse(raw)}catch(e){values={}}
@@ -4239,7 +4240,7 @@ function saveRecipeNote(id,value){
   const notes=recipeNoteMap();
   const clean=String(value??'').slice(0,2000);
   if(clean.trim())notes[id]=clean;else delete notes[id];
-  localStorage.setItem(RECIPE_NOTES_KEY,JSON.stringify(notes));
+  window.ClairStorage.setItem(RECIPE_NOTES_KEY,JSON.stringify(notes));
   V73_NOTES_RAW=null;
   updateNoteIndicators(id);
 }
@@ -4252,7 +4253,7 @@ let V73_REACTIONS_RAW=null;
 let V73_REACTIONS_MAP={};
 function refreshReactionCache(){
   let raw='{}';
-  try{raw=localStorage.getItem(REACTIONS_KEY)||'{}'}catch(e){}
+  try{raw=window.ClairStorage.getItem(REACTIONS_KEY)||'{}'}catch(e){}
   if(raw===V73_REACTIONS_RAW)return;
   let values={};
   try{values=JSON.parse(raw)}catch(e){values={}}
@@ -4264,14 +4265,14 @@ function reactionMap(){refreshReactionCache();return{...V73_REACTIONS_MAP}}
 function recipeReaction(id){refreshReactionCache();return V73_REACTIONS_MAP[id]||null}
 function writeReactionMap(values){
   const clean=Object.fromEntries(Object.entries(values||{}).filter(([id,value])=>recipeIndex.has(id)&&['again','notForMe'].includes(value)));
-  localStorage.setItem(REACTIONS_KEY,JSON.stringify(clean));
+  window.ClairStorage.setItem(REACTIONS_KEY,JSON.stringify(clean));
   V73_REACTIONS_RAW=null;
 }
 const RECIPE_USAGE_TYPES=['mid','eve','starter','dessert'];
 function normalizeRecipeUsageType(type){return RECIPE_USAGE_TYPES.includes(type)?type:'mid'}
 function learningData(){
   let raw=null;
-  try{raw=JSON.parse(localStorage.getItem(LEARNING_KEY)||'null')}catch(e){raw=null}
+  try{raw=JSON.parse(window.ClairStorage.getItem(LEARNING_KEY)||'null')}catch(e){raw=null}
   const data={version:3,choices:[],selections:[],stats:{}};
   if(!raw||typeof raw!=='object')return data;
   if(Array.isArray(raw.choices)){
@@ -4294,7 +4295,7 @@ function learningData(){
   return data;
 }
 function saveLearningData(data){
-  localStorage.setItem(LEARNING_KEY,JSON.stringify({
+  window.ClairStorage.setItem(LEARNING_KEY,JSON.stringify({
     version:3,
     choices:(data.choices||[]).slice(-LEARNING_CHOICE_LIMIT),
     selections:(data.selections||[]).slice(-LEARNING_CHOICE_LIMIT),
@@ -4380,8 +4381,8 @@ function updateReactionUI(){
   });
 }
 function resetLearnedPreferences(){
-  localStorage.removeItem(REACTIONS_KEY);
-  localStorage.removeItem(LEARNING_KEY);
+  window.ClairStorage.removeItem(REACTIONS_KEY);
+  window.ClairStorage.removeItem(LEARNING_KEY);
   updateReactionUI();
   show('Préférences réinitialisées · favoris conservés');
 }
@@ -4629,11 +4630,11 @@ function updateProgramSummary(){
   $('programSummary').textContent=`${count} ${count===1?'jour':'jours'} · Midi et Soir`;
 }
 
-$('people').value=localStorage.getItem('crPeople')||'2';
-$('days').value=localStorage.getItem('crDays')||'2';
-$('mode').value=localStorage.getItem('crMode')||'Tous';
-$('timeAvailable').value=localStorage.getItem('crTimeAvailable')||'Tous';
-$('mealContext').value=localStorage.getItem('crMealContext')||'auto';
+$('people').value=window.ClairStorage.getItem('crPeople')||'2';
+$('days').value=window.ClairStorage.getItem('crDays')||'2';
+$('mode').value=window.ClairStorage.getItem('crMode')||'Tous';
+$('timeAvailable').value=window.ClairStorage.getItem('crTimeAvailable')||'Tous';
+$('mealContext').value=window.ClairStorage.getItem('crMealContext')||'auto';
 function updatePlanningOptionsSummary(){
   const parts=[];
   const time=$('timeAvailable')?.value||'Tous';
@@ -5135,14 +5136,14 @@ const ANTI_REPEAT_DAYS=20;
 const USAGE_KEY='crMealUsageV19';
 function usageData(){
   let data;
-  try{data=JSON.parse(localStorage.getItem(USAGE_KEY)||'null')}catch(e){data=null}
+  try{data=JSON.parse(window.ClairStorage.getItem(USAGE_KEY)||'null')}catch(e){data=null}
   if(!data||!Array.isArray(data.mid)||!Array.isArray(data.eve))data={mid:[],eve:[],sequence:[],seeded:false};
   if(!Array.isArray(data.sequence))data.sequence=[];
 
   // Au premier lancement, reprendre l’historique déjà présent dans l’application.
   if(!data.seeded){
     let history=[];
-    try{history=JSON.parse(localStorage.getItem('crHistoryV13')||'[]')}catch(e){}
+    try{history=JSON.parse(window.ClairStorage.getItem('crHistoryV13')||'[]')}catch(e){}
     history.forEach(entry=>{
       const at=new Date(`${entry.date}T12:00:00`).getTime();
       (entry.plan||[]).forEach(d=>{
@@ -5176,14 +5177,14 @@ function usageData(){
     .filter(item=>item&&item.id&&Number(item.at)>=cutoff)
     .sort((a,b)=>Number(a.at)-Number(b.at))
     .slice(-80);
-  localStorage.setItem(USAGE_KEY,JSON.stringify(data));
+  window.ClairStorage.setItem(USAGE_KEY,JSON.stringify(data));
   return data;
 }
 const COURSE_USAGE_KEY='crCourseUsageV37';
 const COURSE_RECENT_LIMIT=30;
 function courseUsageData(){
   let raw=null;
-  try{raw=JSON.parse(localStorage.getItem(COURSE_USAGE_KEY)||'null')}catch(e){raw=null}
+  try{raw=JSON.parse(window.ClairStorage.getItem(COURSE_USAGE_KEY)||'null')}catch(e){raw=null}
   const data={version:1,selected:{starter:[],dessert:[]},recent:{starter:[],dessert:[]}};
   if(raw&&typeof raw==='object'){
     for(const type of ['starter','dessert']){
@@ -5199,7 +5200,7 @@ function courseUsageData(){
   for(const type of ['starter','dessert'])data.selected[type]=data.selected[type].filter(item=>item.at>=cutoff);
   return data;
 }
-function saveCourseUsageData(data){localStorage.setItem(COURSE_USAGE_KEY,JSON.stringify(data))}
+function saveCourseUsageData(data){window.ClairStorage.setItem(COURSE_USAGE_KEY,JSON.stringify(data))}
 function rememberCourseProposal(type,id){
   if(!['starter','dessert'].includes(type)||!recipeIndex.has(id))return;
   const data=courseUsageData();
@@ -5232,14 +5233,14 @@ function rememberSelectedMeal(type,id,at=Date.now()){
     data.sequence.push(historyItem(recipe,type,at));
     data.sequence=data.sequence.slice(-80);
   }
-  localStorage.setItem(USAGE_KEY,JSON.stringify(data));
+  window.ClairStorage.setItem(USAGE_KEY,JSON.stringify(data));
 }
 function forgetMeal(type,id){
   if(!id)return;
   const data=usageData();
   data[type]=data[type].filter(item=>item.id!==id);
   data.sequence=data.sequence.filter(item=>!(item.type===type&&item.id===id));
-  localStorage.setItem(USAGE_KEY,JSON.stringify(data));
+  window.ClairStorage.setItem(USAGE_KEY,JSON.stringify(data));
 }
 function rememberPlan(items){
   activeAllRecipeEntries(items).forEach(item=>{
@@ -5398,7 +5399,7 @@ let browserExploreAll=false;
 function browserDiscoveryData(){
   let raw=null;
   try{
-    raw=JSON.parse(localStorage.getItem(BROWSER_DISCOVERY_KEY)||localStorage.getItem(BROWSER_PREVIOUS_DISCOVERY_KEY)||'null');
+    raw=JSON.parse(window.ClairStorage.getItem(BROWSER_DISCOVERY_KEY)||window.ClairStorage.getItem(BROWSER_PREVIOUS_DISCOVERY_KEY)||'null');
   }catch(e){raw=null}
   const data={version:3,stats:{},recentIds:[]};
   if(!raw||typeof raw!=='object')return data;
@@ -5416,7 +5417,7 @@ function browserDiscoveryData(){
   return data;
 }
 function saveBrowserDiscoveryData(data){
-  localStorage.setItem(BROWSER_DISCOVERY_KEY,JSON.stringify({
+  window.ClairStorage.setItem(BROWSER_DISCOVERY_KEY,JSON.stringify({
     version:3,
     stats:data.stats||{},
     recentIds:Array.isArray(data.recentIds)?data.recentIds.slice(-BROWSER_DISCOVERY_TRAIL_LIMIT):[]
@@ -5434,7 +5435,7 @@ function browserCompatibleRecipes(list){
 }
 function browserDeckData(){
   let raw=null;
-  try{raw=JSON.parse(localStorage.getItem(BROWSER_DECK_KEY)||'null')}catch(e){raw=null}
+  try{raw=JSON.parse(window.ClairStorage.getItem(BROWSER_DECK_KEY)||'null')}catch(e){raw=null}
   const data={version:1,decks:{}};
   if(!raw||raw.version!==1||!raw.decks||typeof raw.decks!=='object')return data;
   Object.entries(raw.decks).forEach(([key,value])=>{
@@ -5452,7 +5453,7 @@ function saveBrowserDeckData(data){
   const decks=Object.fromEntries(Object.entries(data.decks||{})
     .sort((left,right)=>Number(right[1].lastUsedAt||0)-Number(left[1].lastUsedAt||0))
     .slice(0,20));
-  localStorage.setItem(BROWSER_DECK_KEY,JSON.stringify({version:1,decks}));
+  window.ClairStorage.setItem(BROWSER_DECK_KEY,JSON.stringify({version:1,decks}));
 }
 function browserPoolSignature(pool){
   let hash=2166136261;
@@ -7782,7 +7783,7 @@ function buildPlan(count,template=plan){
   return result;
 }
 function saveState(){
-  localStorage.setItem('crStateV13',JSON.stringify({
+  window.ClairStorage.setItem('crStateV13',JSON.stringify({
     date:todayKey(),
     days:Number($('days').value),
     mode:$('mode').value,
@@ -7832,7 +7833,7 @@ function saveHistory(){
       eveStatus:mealStatus(d,'eve')
     }))
   });
-  localStorage.setItem('crHistoryV13',JSON.stringify(h.slice(0,10)));
+  window.ClairStorage.setItem('crHistoryV13',JSON.stringify(h.slice(0,10)));
   renderHistory();
 }
 function renderHistory(){
@@ -7908,7 +7909,7 @@ function refreshPortionDisplays(){
 function setPeopleCount(value,announce=true){
   const count=Math.max(1,Math.min(8,Math.round(Number(value)||2)));
   $('people').value=String(count);
-  localStorage.setItem('crPeople',String(count));
+  window.ClairStorage.setItem('crPeople',String(count));
   refreshPortionDisplays();
   if(announce)show(`Quantités adaptées pour ${count} ${count===1?'personne':'personnes'}`);
 }
@@ -8016,8 +8017,8 @@ function timerClock(seconds){
   return `${String(minutes).padStart(2,'0')}:${String(rest).padStart(2,'0')}`;
 }
 function saveTimer(){
-  if(kitchenTimer)localStorage.setItem(TIMER_KEY,JSON.stringify(kitchenTimer));
-  else localStorage.removeItem(TIMER_KEY);
+  if(kitchenTimer)window.ClairStorage.setItem(TIMER_KEY,JSON.stringify(kitchenTimer));
+  else window.ClairStorage.removeItem(TIMER_KEY);
 }
 function updateTimerUI(){
   const bar=$('kitchenTimer');
@@ -8069,7 +8070,7 @@ function stopKitchenTimer(){
 }
 $('timerStop').onclick=stopKitchenTimer;
 try{
-  const savedTimer=JSON.parse(localStorage.getItem(TIMER_KEY)||'null');
+  const savedTimer=JSON.parse(window.ClairStorage.getItem(TIMER_KEY)||'null');
   if(savedTimer&&Number(savedTimer.endAt)>Date.now()-12*60*60*1000)kitchenTimer=savedTimer;
 }catch(e){}
 if(kitchenTimer&&Number(kitchenTimer.endAt)>Date.now())startTimerTick();
@@ -8446,7 +8447,7 @@ function loadSavedPlan(savedPlan){
 }
 function loadOrCreate(){
   let saved=null;
-  try{saved=JSON.parse(localStorage.getItem('crStateV13')||'null')}catch(e){}
+  try{saved=JSON.parse(window.ClairStorage.getItem('crStateV13')||'null')}catch(e){}
   // Les anciens programmes V2.2 sont repris avec Midi et Soir activés par défaut.
   if(saved&&Array.isArray(saved.plan)&&saved.plan.length){
     plan=loadSavedPlan(saved.plan);
@@ -8750,31 +8751,31 @@ $('newPlan').onclick=()=>{
   }
 };
 $('days').onchange=()=>{
-  localStorage.setItem('crDays',$('days').value);
+  window.ClairStorage.setItem('crDays',$('days').value);
   syncDayChoice();
 };
 document.querySelectorAll('.day-option').forEach(button=>button.onclick=()=>{
   const next=String(button.dataset.days||'');
   if(!['1','2','3'].includes(next))return;
   $('days').value=next;
-  localStorage.setItem('crDays',next);
+  window.ClairStorage.setItem('crDays',next);
   syncDayChoice();
 });
 $('people').onchange=()=>{
   setPeopleCount($('people').value,false);
 };
 $('mode').onchange=()=>{
-  localStorage.setItem('crMode',$('mode').value);
+  window.ClairStorage.setItem('crMode',$('mode').value);
   updatePlanningOptionsSummary();
   show('Préférence enregistrée pour le prochain programme');
 };
 $('timeAvailable').onchange=()=>{
-  localStorage.setItem('crTimeAvailable',$('timeAvailable').value);
+  window.ClairStorage.setItem('crTimeAvailable',$('timeAvailable').value);
   updatePlanningOptionsSummary();
   show('Temps enregistré pour le prochain programme');
 };
 $('mealContext').onchange=()=>{
-  localStorage.setItem('crMealContext',$('mealContext').value);
+  window.ClairStorage.setItem('crMealContext',$('mealContext').value);
   updatePlanningOptionsSummary();
   show($('mealContext').value==='auto'?'Contexte automatique réactivé':'Contexte enregistré pour le prochain programme');
 };

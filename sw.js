@@ -12,10 +12,11 @@
  */
 
 const APP_ID = "clair-repas";
+const TEST_STORAGE_APP_ID = "clair-repas-v8-test";
 const RELEASE = "8.0.0-foundation.9";
 const FOUNDATION_LABEL = RELEASE.slice(RELEASE.lastIndexOf("-") + 1).toUpperCase();
 const DATA_SCHEMA = 2;
-const CORE_REVISION = "sha256:9e312076a90f8fb71386c04faca9f17d56e04ee8360915c2235241b859afaa00";
+const CORE_REVISION = "sha256:a22f7af14742c80ad3d656511561603b0e9206ac743d030ae00600d2bcbc961b";
 const BOOT_GRACE_MS = 18000;
 
 function fnv1a(text) {
@@ -47,6 +48,7 @@ const CORE_FILES = [
   "./manifest.webmanifest",
   "./icon-192.png",
   "./icon-512.png",
+  "./v8/clair-test-storage.js",
   "./v8/clair-sync.js",
   "./v8/vendor/supabase-js-2.111.0.js",
   "./v8/clair-foundation.js",
@@ -64,15 +66,16 @@ const FOUNDATION_CORE_FILES = LOCAL_SYNC_CORE_FILES.filter(
   path => path !== "./v8/clair-sync.js"
 );
 const CORE_DIGESTS = Object.freeze({
-  "./": "sha256:0bf3158094bcf14a1835a58f5236602070219ca90306d4d8a48dbb4396c03213",
-  "./index.html": "sha256:0bf3158094bcf14a1835a58f5236602070219ca90306d4d8a48dbb4396c03213",
+  "./": "sha256:ce9bbf02bf88b959064c420933b75169971b9a03808c76c70011957cf3735d86",
+  "./index.html": "sha256:ce9bbf02bf88b959064c420933b75169971b9a03808c76c70011957cf3735d86",
   "./manifest.webmanifest": "sha256:49b30612587c379d6bb8c6d9ade4e299ff244b41f0bd03e2fcca0a5495834e2a",
   "./icon-192.png": "sha256:8d0d516fdcb7d76a40df62dc92d4f312a1557b9e105917026780e465c32fa9f8",
   "./icon-512.png": "sha256:334f3158730e33ad8232ea229a39f9193b45274f1a72b2f55467b1e625924f70",
-  "./v8/clair-sync.js": "sha256:004f4482c02dec7f8857b6abd576567b6ab45e7cde5a5a674d839be76ae9ed4e",
+  "./v8/clair-test-storage.js": "sha256:7fb08b770365a06f24e447db7b52dc547d0598c802893606aba9bbad8ce6d64a",
+  "./v8/clair-sync.js": "sha256:26ba7a04570d92e57d38e0c8ca7783070766ee183e0fa407e381b850b5987590",
   "./v8/vendor/supabase-js-2.111.0.js": "sha256:7396012594aa6d23bb373ebc25d1080bf3672fa847c3713f756520b40fd13453",
-  "./v8/clair-foundation.js": "sha256:09397ead325b92a28a005747131dd07d8419f3ffbe84fec6ff515feef69b7f36",
-  "./v8/clair-cloud-sync.js": "sha256:cdd6d60428b3c3df336fdf9b1c9d832183da64462b42d13c1a608e3c20ca8680",
+  "./v8/clair-foundation.js": "sha256:60ff85678673ab82d3e8ee6f46f73f882f3cf94a04cba1ccad460061067f3128",
+  "./v8/clair-cloud-sync.js": "sha256:e17375c1c8fc17b8f05423c11d27562845ff05d773512c197bd189158d9ca83f",
   "./v8/version.json": "sha256:8ce6d59b9f3a56cff854b1098cadec650b087c71a69c7a34b8738fa5c4022aaa"
 });
 
@@ -94,26 +97,55 @@ async function cacheExists(cacheName) {
   return names.includes(cacheName);
 }
 
-async function requiredCoreFiles(cacheName, cache) {
-  if (cacheName === CURRENT_CACHE) return CORE_FILES;
+function isolatedShellProfile(html) {
+  if (/\blocalStorage\b/.test(html)) return null;
+  const storagePosition = html.indexOf("data-clair-v8-test-storage");
+  const syncPosition = html.indexOf("data-clair-v8-sync");
+  const foundationPosition = html.indexOf("data-clair-v8-foundation");
+  const cloudPosition = html.indexOf("data-clair-v8-cloud-sync");
+  const hasStorage = storagePosition >= 0;
+  const hasSync = syncPosition >= 0;
+  const hasFoundation = foundationPosition >= 0;
+  const hasCloud = cloudPosition >= 0;
 
+  if (!hasStorage || !hasFoundation) return null;
+  if (hasCloud && hasSync) {
+    return (
+      storagePosition < syncPosition &&
+      syncPosition < foundationPosition &&
+      foundationPosition < cloudPosition
+    ) ? "cloud" : null;
+  }
+  if (hasCloud) return null;
+  if (hasSync) {
+    return storagePosition < syncPosition && syncPosition < foundationPosition
+      ? "local"
+      : null;
+  }
+  return storagePosition < foundationPosition ? "foundation" : null;
+}
+
+async function requiredCoreFiles(cacheName, cache) {
   // Chaque génération de bootstrap conserve son propre ensemble atomique :
   // Foundation.8, Foundation.9 local, puis Foundation.9 avec transport cloud.
   try {
-    const shell =
-      (await cache.match(appIndexUrl())) ||
-      (await cache.match(appRootUrl()));
-    if (!shell) return FOUNDATION_CORE_FILES;
-    const html = await shell.clone().text();
-    const hasSync = html.includes("data-clair-v8-sync");
-    const hasFoundation = html.includes("data-clair-v8-foundation");
-    const hasCloud = html.includes("data-clair-v8-cloud-sync");
-    if (hasCloud && hasSync && hasFoundation) return CORE_FILES;
-    if (hasCloud || (hasSync && !hasFoundation)) return null;
-    if (hasSync) return LOCAL_SYNC_CORE_FILES;
-    return FOUNDATION_CORE_FILES;
+    const rootShell = await cache.match(appRootUrl());
+    const indexShell = await cache.match(appIndexUrl());
+    if (!rootShell || !indexShell) return null;
+    const [rootProfile, indexProfile] = await Promise.all([
+      rootShell.clone().text().then(isolatedShellProfile),
+      indexShell.clone().text().then(isolatedShellProfile)
+    ]);
+    if (!rootProfile || rootProfile !== indexProfile) return null;
+    if (cacheName === CURRENT_CACHE) {
+      return rootProfile === "cloud" ? CORE_FILES : null;
+    }
+    if (rootProfile === "cloud") return CORE_FILES;
+    if (rootProfile === "local") return LOCAL_SYNC_CORE_FILES;
+    if (rootProfile === "foundation") return FOUNDATION_CORE_FILES;
+    return null;
   } catch (_) {
-    return CORE_FILES;
+    return null;
   }
 }
 
@@ -242,12 +274,60 @@ async function migrateLegacyFallback() {
   }
 
   const legacyState = await readLegacyState();
-  const legacyHealthy = await chooseLegacyHealthyCache(legacyState);
-  if (!legacyHealthy) return state;
+  const names = await caches.keys();
+  const available = new Set(
+    names.filter(name => isAppCache(name) || name.startsWith(LEGACY_APP_PREFIX))
+  );
+  const failed = new Set([state.failedCache, legacyState.failedCache].filter(Boolean));
+  const knownCandidates = [
+    state.lastHealthyCache,
+    state.probation ? null : state.activeCache,
+    state.previousCache,
+    legacyState.lastHealthyCache,
+    legacyState.probation ? null : legacyState.activeCache,
+    legacyState.previousCache
+  ];
+  const known = new Set(knownCandidates.filter(Boolean));
+  const candidates = [
+    ...knownCandidates,
+    ...available
+  ];
 
-  const migratedCache = `${CACHE_PREFIX}${legacyReleaseFromCache(legacyHealthy)}`;
-  const copied = await copyCache(legacyHealthy, migratedCache);
-  if (!copied) return state;
+  let sourceCache = null;
+  let migratedCache = null;
+  let protectedFallbackError = null;
+  for (const candidate of [...new Set(candidates.filter(Boolean))]) {
+    if (
+      candidate === CURRENT_CACHE ||
+      failed.has(candidate) ||
+      !available.has(candidate)
+    ) continue;
+    if (await cacheHasCore(candidate)) {
+      sourceCache = candidate;
+      migratedCache = candidate;
+      break;
+    }
+    try {
+      const guarded = await hardenFallbackCache(candidate);
+      if (guarded) {
+        sourceCache = candidate;
+        migratedCache = guarded;
+        break;
+      }
+    } catch (error) {
+      if (known.has(candidate)) protectedFallbackError = error;
+    }
+  }
+  if (!migratedCache) {
+    if (protectedFallbackError) {
+      throw new Error(
+        "V8 migration: known fallback could not be isolated (" +
+          String(protectedFallbackError?.message || protectedFallbackError) +
+          ")"
+      );
+    }
+    return state;
+  }
 
   state = await writeState({
     ...state,
@@ -256,16 +336,20 @@ async function migrateLegacyFallback() {
       state.activeCache && (await cacheHasCore(state.activeCache))
         ? state.activeCache
         : migratedCache,
-    previousCache: state.previousCache || null,
+    previousCache: migratedCache,
     lastHealthyCache: migratedCache,
     failedCache: state.failedCache || null,
     probation: Boolean(state.probation),
     bootFailures: Number(state.bootFailures || 0),
-    migratedFromLegacy: legacyHealthy,
+    migratedFromLegacy: sourceCache,
     migratedAt: new Date().toISOString()
   });
 
   return state;
+}
+
+function storageTag() {
+  return `<script src="./v8/clair-test-storage.js" data-clair-v8-test-storage data-clair-storage-app="${TEST_STORAGE_APP_ID}" data-clair-app="${APP_ID}" data-clair-release="${RELEASE}" data-clair-schema="${DATA_SCHEMA}" data-clair-core="${CORE_REVISION}"></script>`;
 }
 
 function syncTag() {
@@ -281,7 +365,33 @@ function cloudSyncTag() {
 }
 
 function runtimeTags() {
+  return `${storageTag()}\n${runtimeContinuationTags()}`;
+}
+
+function runtimeContinuationTags() {
   return `${syncTag()}\n${foundationTag()}\n${cloudSyncTag()}`;
+}
+
+function routeTestPersonalStorage(text) {
+  const isolated = String(text)
+    .replace(/\bwindow\.localStorage\b/g, "window.ClairStorage")
+    .replace(/\blocalStorage\b/g, "window.ClairStorage");
+  if (/\blocalStorage\b/.test(isolated)) {
+    throw new Error("V8 isolation: raw personal storage remains in application shell");
+  }
+  return isolated;
+}
+
+function isolationFallbackHtml(text) {
+  const withoutRuntime = String(text).replace(
+    /<script\b(?=[^>]*\bdata-clair-v8-(?:test-storage|sync|foundation|cloud-sync)\b)[^>]*><\/script>\s*/gi,
+    ""
+  );
+  const isolated = routeTestPersonalStorage(withoutRuntime);
+  const tags = `${storageTag()}\n${syncTag()}\n${foundationTag()}`;
+  return /<head(?:\s[^>]*)?>/i.test(isolated)
+    ? isolated.replace(/<head(?:\s[^>]*)?>/i, match => `${match}\n${tags}`)
+    : `${tags}\n${isolated}`;
 }
 
 function responseInit(response) {
@@ -297,23 +407,116 @@ function responseInit(response) {
 
 async function injectRuntime(response) {
   const text = await response.text();
+  const hasStorage = text.includes("data-clair-v8-test-storage");
   const hasSync = text.includes("data-clair-v8-sync");
   const hasFoundation = text.includes("data-clair-v8-foundation");
   const hasCloud = text.includes("data-clair-v8-cloud-sync");
-  const markerCount = Number(hasSync) + Number(hasFoundation) + Number(hasCloud);
-  if (markerCount > 0 && markerCount < 3) {
-    throw new Error("V8 install: incomplete runtime bootstrap in HTML");
-  }
-  if (markerCount === 3) {
+  const markerCount =
+    Number(hasStorage) + Number(hasSync) + Number(hasFoundation) + Number(hasCloud);
+  if (markerCount === 4) {
+    const storagePosition = text.indexOf("data-clair-v8-test-storage");
+    const syncPosition = text.indexOf("data-clair-v8-sync");
+    const foundationPosition = text.indexOf("data-clair-v8-foundation");
+    const cloudPosition = text.indexOf("data-clair-v8-cloud-sync");
+    if (!(
+      storagePosition < syncPosition &&
+      syncPosition < foundationPosition &&
+      foundationPosition < cloudPosition
+    )) {
+      throw new Error("V8 install: invalid runtime bootstrap order");
+    }
     return new Response(text, responseInit(response));
   }
 
+  if (markerCount === 1 && hasStorage) {
+    const storageScript =
+      /<script\b(?=[^>]*\bdata-clair-v8-test-storage\b)[^>]*><\/script>/i;
+    if (!storageScript.test(text)) {
+      throw new Error("V8 install: invalid test-storage bootstrap in HTML");
+    }
+    const html = text.replace(
+      storageScript,
+      `${storageTag()}\n${runtimeContinuationTags()}`
+    );
+    return new Response(html, responseInit(response));
+  }
+
+  if (markerCount > 0) {
+    throw new Error("V8 install: incomplete runtime bootstrap in HTML");
+  }
+
   const tags = runtimeTags();
-  const html = /<head(?:\s[^>]*)?>/i.test(text)
-    ? text.replace(/<head(?:\s[^>]*)?>/i, match => `${match}\n${tags}`)
-    : `${tags}\n${text}`;
+  const isolated = routeTestPersonalStorage(text);
+  const html = /<head(?:\s[^>]*)?>/i.test(isolated)
+    ? isolated.replace(/<head(?:\s[^>]*)?>/i, match => `${match}\n${tags}`)
+    : `${tags}\n${isolated}`;
 
   return new Response(html, responseInit(response));
+}
+
+async function hardenFallbackCache(sourceName) {
+  if (!sourceName || sourceName === CURRENT_CACHE) return null;
+  const sourceNames = await caches.keys();
+  if (!sourceNames.includes(sourceName)) return null;
+
+  const targetName =
+    `${CACHE_PREFIX}isolated-fallback-${fnv1a(sourceName)}-` +
+    CORE_REVISION.slice(7, 19);
+  if (await cacheHasCore(targetName)) return targetName;
+
+  await caches.delete(targetName);
+  const source = await caches.open(sourceName);
+  const current = await caches.open(CURRENT_CACHE);
+  const target = await caches.open(targetName);
+
+  try {
+    const sourceShell =
+      (await source.match(appIndexUrl())) ||
+      (await source.match(appRootUrl()));
+    if (!sourceShell) throw new Error("V8 migration: fallback shell missing");
+
+    for (const path of [
+      "./manifest.webmanifest",
+      "./icon-192.png",
+      "./icon-512.png"
+    ]) {
+      const url = new URL(path, self.registration.scope).toString();
+      if (!(await source.match(url, { ignoreSearch: true }))) {
+        throw new Error(`V8 migration: fallback asset missing (${path})`);
+      }
+    }
+
+    const requests = await source.keys();
+    for (const request of requests) {
+      const response = await source.match(request);
+      if (response) await target.put(request, response.clone());
+    }
+
+    for (const path of [
+      "./v8/clair-test-storage.js",
+      "./v8/clair-sync.js",
+      "./v8/clair-foundation.js",
+      "./v8/version.json"
+    ]) {
+      const url = new URL(path, self.registration.scope).toString();
+      const response = await current.match(url, { ignoreSearch: true });
+      if (!response) throw new Error(`V8 migration: isolated runtime missing (${path})`);
+      await target.put(url, response.clone());
+    }
+
+    const guardedHtml = isolationFallbackHtml(await sourceShell.text());
+    for (const url of [appRootUrl(), appIndexUrl()]) {
+      await target.put(url, new Response(guardedHtml, responseInit(sourceShell)));
+    }
+
+    if (!(await cacheHasCore(targetName))) {
+      throw new Error("V8 migration: isolated fallback cache invalid");
+    }
+    return targetName;
+  } catch (error) {
+    await caches.delete(targetName);
+    throw error;
+  }
 }
 
 async function validateVersionManifest(response) {
@@ -536,7 +739,7 @@ async function startBootAttemptSafely(state) {
 }
 
 async function serveFromCache(cacheName, request) {
-  if (!cacheName || !(await cacheExists(cacheName))) return null;
+  if (!cacheName || !(await cacheHasCore(cacheName))) return null;
 
   const cache = await caches.open(cacheName);
   let response = await cache.match(request, { ignoreSearch: true });
@@ -669,8 +872,8 @@ async function statusResponse() {
 self.addEventListener("install", event => {
   event.waitUntil(
     (async () => {
-      await migrateLegacyFallback();
       await buildCandidateCache();
+      await migrateLegacyFallback();
       await self.skipWaiting();
     })()
   );
@@ -794,7 +997,8 @@ self.addEventListener("fetch", event => {
         const previous = await serveFromCache(servingState.previousCache, request);
         if (previous) return previous;
 
-        return fetch(request, { cache: "no-store" });
+        const network = await fetch(request, { cache: "no-store" });
+        return network.ok ? injectRuntime(network) : network;
       })()
     );
     return;

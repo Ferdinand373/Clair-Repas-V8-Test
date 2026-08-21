@@ -6,6 +6,16 @@
   const RELEASE = script?.dataset?.clairRelease || '8.0.0-foundation.9';
   const DATA_SCHEMA = Number(script?.dataset?.clairSchema || 2);
   const CORE_REVISION = script?.dataset?.clairCore || '';
+  const STORAGE_PROTOCOL = 'clair-test-storage/v1';
+  const STORAGE_APP_ID = 'clair-repas-v8-test';
+  const storage = window.ClairStorage;
+
+  if (
+    !storage ||
+    storage.ready !== true ||
+    storage.protocol !== STORAGE_PROTOCOL ||
+    storage.appId !== STORAGE_APP_ID
+  ) return;
 
   function fnv1a(text) {
     let h = 0x811c9dc5;
@@ -41,10 +51,10 @@
 
   function readPersonalData() {
     const values = {};
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i);
+    for (let i = 0; i < storage.length; i += 1) {
+      const key = storage.key(i);
       if (!key || !personalKey(key)) continue;
-      const value = localStorage.getItem(key);
+      const value = storage.getItem(key);
       if (value !== null) values[key] = value;
     }
     return values;
@@ -67,8 +77,8 @@
 
   function currentPersonalKeys() {
     const keys = [];
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i);
+    for (let i = 0; i < storage.length; i += 1) {
+      const key = storage.key(i);
       if (key && personalKey(key)) keys.push(key);
     }
     return keys;
@@ -80,12 +90,12 @@
     // Les écritures précèdent les suppressions afin qu'un quota insuffisant
     // n'efface pas d'abord la photo personnelle encore saine.
     for (const [key, value] of Object.entries(values)) {
-      localStorage.setItem(key, value);
+      storage.setItem(key, value);
     }
 
     for (const key of current) {
       if (!Object.prototype.hasOwnProperty.call(values, key)) {
-        localStorage.removeItem(key);
+        storage.removeItem(key);
       }
     }
   }
@@ -105,7 +115,7 @@
     for (const key of Object.keys(current)) {
       if (Object.prototype.hasOwnProperty.call(before, key)) continue;
       try {
-        localStorage.removeItem(key);
+        storage.removeItem(key);
       } catch (_) {
         recovered = false;
       }
@@ -122,7 +132,7 @@
 
     for (const { key, value } of originals) {
       try {
-        localStorage.setItem(key, value);
+        storage.setItem(key, value);
       } catch (_) {
         recovered = false;
       }
@@ -160,7 +170,7 @@
       replace(values);
       return true;
     } catch (_) {
-      // localStorage n'est pas transactionnel : rétablir l'avant-image si une
+      // Le stockage navigateur n'est pas transactionnel : rétablir l'avant-image si une
       // écriture ou une suppression échoue au milieu de la synchronisation.
       restoreBeforeImage(before);
       return false;
@@ -179,6 +189,8 @@
     release: RELEASE,
     coreRevision: CORE_REVISION,
     dataSchema: DATA_SCHEMA,
+    storageProtocol: STORAGE_PROTOCOL,
+    storageAppId: STORAGE_APP_ID,
     scopePath: SCOPE_PATH,
     scopeId: SCOPE_ID,
     capture,

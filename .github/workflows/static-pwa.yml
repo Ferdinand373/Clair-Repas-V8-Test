@@ -32,6 +32,7 @@ jobs:
       - name: Check standalone JavaScript syntax
         run: |
           node --check sw.js
+          node --check v8/clair-test-storage.js
           node --check v8/clair-sync.js
           node --check v8/clair-foundation.js
           node --check v8/clair-cloud-sync.js

@@ -10,8 +10,12 @@
   const CLOUD_PROTOCOL = 'clair-cloud-sync/v1';
   const META_PROTOCOL = 'clair-cloud-sync-meta/v1';
   const CLOUD_APP_ID = 'clair-repas-v8-test';
+  const STORAGE_PROTOCOL = 'clair-test-storage/v1';
   const INTEGRATION = 'clair-v8-foundation.9';
-  const META_STORAGE_KEY = 'clair.v8.sync.meta.' + CLOUD_APP_ID;
+  // Start a fresh technical history for the isolated personal namespace. The
+  // previous metadata may describe production-origin cr... values and must not
+  // generate deletions or uploads in the test bucket.
+  const META_STORAGE_KEY = 'clair.v8.sync.meta.' + CLOUD_APP_ID + '.test-storage-v1';
   const DEVICE_KEY_STORAGE = 'clair.device.key.v1';
   const SUPABASE_URL = 'https://ryyewskgfgysfubesdsj.supabase.co';
   const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_T9Dmg9VKTdMFdCuLVxD54w_7GeH3Q6S';
@@ -509,6 +513,7 @@
     const storage = options.storage || localStorage;
     const cryptoApi = options.crypto || crypto;
     const sync = options.sync || hostWindow.ClairSync;
+    const personalStorage = options.personalStorage || hostWindow.ClairStorage;
     const now = options.now || (() => Date.now());
     const scheduleTimeout = options.setTimeout || setTimeout;
     const cancelTimeout = options.clearTimeout || clearTimeout;
@@ -569,10 +574,21 @@
         throw new Error('clair-sync-unavailable');
       }
       if (
+        !personalStorage ||
+        personalStorage.ready !== true ||
+        personalStorage.protocol !== STORAGE_PROTOCOL ||
+        personalStorage.appId !== CLOUD_APP_ID
+      ) {
+        throw new Error('clair-test-storage-unavailable');
+      }
+      if (
+        sync.protocol !== 'clair-personal-sync/v1' ||
         sync.app !== LOCAL_APP_ID ||
         sync.release !== RELEASE ||
         Number(sync.dataSchema) !== DATA_SCHEMA ||
-        sync.coreRevision !== CORE_REVISION
+        sync.coreRevision !== CORE_REVISION ||
+        sync.storageProtocol !== STORAGE_PROTOCOL ||
+        sync.storageAppId !== CLOUD_APP_ID
       ) {
         throw new Error('clair-sync-runtime-mismatch');
       }
@@ -1291,9 +1307,13 @@
         scheduleSync('online', 150);
       };
       const onStorage = (event) => {
-        if (!event?.key || isPersonalKey(sync, event.key)) {
-          if (event?.key) markDirty(event.key, 'storage', 300);
-          else scheduleSync('storage', 300);
+        if (!event?.key) {
+          scheduleSync('storage', 300);
+          return;
+        }
+        const logical = personalStorage.logicalKey?.(event.key) ?? null;
+        if (logical && isPersonalKey(sync, logical)) {
+          markDirty(logical, 'storage', 300);
         }
       };
       const onVisibility = () => {
@@ -1388,6 +1408,7 @@
       fingerprint,
       constants: Object.freeze({
         CLOUD_APP_ID,
+        STORAGE_PROTOCOL,
         META_STORAGE_KEY,
         DEVICE_KEY_STORAGE,
         INTEGRATION,

@@ -6,6 +6,8 @@
   const RELEASE = script?.dataset?.clairRelease || '8.0.0-foundation.9';
   const DATA_SCHEMA = Number(script?.dataset?.clairSchema || 2);
   const CORE_REVISION = script?.dataset?.clairCore || '';
+  const STORAGE_PROTOCOL = 'clair-test-storage/v1';
+  const STORAGE_APP_ID = 'clair-repas-v8-test';
   const DB_VERSION = 1;
   const STORE = 'snapshots';
   const BOOT_TIMEOUT_MS = 15000;
@@ -31,7 +33,9 @@
 
   const SCOPE_PATH = appScopePath();
   const SCOPE_ID = fnv1a(SCOPE_PATH);
-  const DB_NAME = `clair-v8-personal-${APP_ID}-${SCOPE_ID}`;
+  // A new database namespace prevents snapshots captured before storage
+  // isolation from importing production-origin cr... values into the test app.
+  const DB_NAME = `clair-v8-personal-${APP_ID}-${SCOPE_ID}-${fnv1a(STORAGE_PROTOCOL)}`;
 
   function resolvePersonalSync() {
     const candidate = window.ClairSync;
@@ -41,6 +45,8 @@
       candidate.release !== RELEASE ||
       candidate.coreRevision !== CORE_REVISION ||
       Number(candidate.dataSchema) !== DATA_SCHEMA ||
+      candidate.storageProtocol !== STORAGE_PROTOCOL ||
+      candidate.storageAppId !== STORAGE_APP_ID ||
       candidate.scopePath !== SCOPE_PATH ||
       candidate.scopeId !== SCOPE_ID
     ) return null;
@@ -115,6 +121,8 @@
       kind,
       release: RELEASE,
       dataSchema: DATA_SCHEMA,
+      storageProtocol: STORAGE_PROTOCOL,
+      storageAppId: STORAGE_APP_ID,
       scopePath: SCOPE_PATH,
       scopeId: SCOPE_ID,
       capturedAt: new Date().toISOString(),
@@ -186,6 +194,10 @@
     try {
       if (!record || typeof record !== 'object') return false;
       if (record.app !== APP_ID || Number(record.dataSchema) !== DATA_SCHEMA) return false;
+      if (
+        record.storageProtocol !== STORAGE_PROTOCOL ||
+        record.storageAppId !== STORAGE_APP_ID
+      ) return false;
       if (record.scopePath !== SCOPE_PATH || record.scopeId !== SCOPE_ID) return false;
       if (!validPersonalData(record.values)) return false;
       const capturedAt = Date.parse(record.capturedAt);
@@ -210,6 +222,8 @@
         release: RELEASE,
         coreRevision: CORE_REVISION,
         dataSchema: DATA_SCHEMA,
+        storageProtocol: STORAGE_PROTOCOL,
+        storageAppId: STORAGE_APP_ID,
         scopeId: SCOPE_ID,
         ...extra
       });
@@ -319,6 +333,8 @@
     release: RELEASE,
     coreRevision: CORE_REVISION,
     dataSchema: DATA_SCHEMA,
+    storageProtocol: STORAGE_PROTOCOL,
+    storageAppId: STORAGE_APP_ID,
     scopePath: SCOPE_PATH,
     scopeId: SCOPE_ID,
     listPersonalKeys() {
@@ -347,6 +363,8 @@
         app: APP_ID,
         release: RELEASE,
         dataSchema: DATA_SCHEMA,
+        storageProtocol: STORAGE_PROTOCOL,
+        storageAppId: STORAGE_APP_ID,
         scopePath: SCOPE_PATH,
         scopeId: SCOPE_ID,
         personalSyncReady: Boolean(personalSync),

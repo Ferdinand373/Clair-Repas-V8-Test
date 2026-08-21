@@ -14,6 +14,8 @@ const RELEASE = "8.0.0-foundation.9";
 const DATA_SCHEMA = 2;
 const CORE_REVISION = "sha256:test-core-revision";
 const TEST_APP_ID = "clair-repas-v8-test";
+const STORAGE_PROTOCOL = "clair-test-storage/v1";
+const PERSONAL_PREFIX = "clair.v8.test.personal.";
 const successes = [];
 const failures = [];
 
@@ -84,6 +86,8 @@ class FakeSync {
     this.release = RELEASE;
     this.dataSchema = DATA_SCHEMA;
     this.coreRevision = CORE_REVISION;
+    this.storageProtocol = STORAGE_PROTOCOL;
+    this.storageAppId = TEST_APP_ID;
   }
 
   capture() {
@@ -111,6 +115,25 @@ class FakeSync {
     ) return false;
     this.values = { ...values };
     return true;
+  }
+}
+
+class FakePersonalStorage {
+  constructor() {
+    this.ready = true;
+    this.protocol = STORAGE_PROTOCOL;
+    this.appId = TEST_APP_ID;
+    this.namespace = "clair.v8.test.personal";
+  }
+
+  logicalKey(key) {
+    key = String(key);
+    if (key.startsWith(PERSONAL_PREFIX)) {
+      const logical = key.slice(PERSONAL_PREFIX.length);
+      return /^cr[A-Za-z0-9_.-]+$/.test(logical) ? logical : null;
+    }
+    if (/^cr[A-Za-z0-9_.-]+$/.test(key)) return null;
+    return key;
   }
 }
 
@@ -250,8 +273,13 @@ vm.runInNewContext(
 const api = moduleWindow.ClairCloudSyncTest;
 assert.ok(api, "Cloud Sync test API was not exposed");
 
-function makeHarness({ values = {}, transport = new MemoryTransport(), storage } = {}) {
-  const sync = new FakeSync(values);
+function makeHarness({
+  values = {},
+  transport = new MemoryTransport(),
+  storage,
+  personalStorage = new FakePersonalStorage(),
+  sync = new FakeSync(values)
+} = {}) {
   const technicalStorage = storage || new FakeStorage();
   const windowTarget = new FakeEventTarget();
   const documentTarget = new FakeEventTarget();
@@ -265,6 +293,7 @@ function makeHarness({ values = {}, transport = new MemoryTransport(), storage }
       platform: "Win32"
     },
     storage: technicalStorage,
+    personalStorage,
     crypto: webcrypto,
     sync,
     transport,
@@ -275,6 +304,7 @@ function makeHarness({ values = {}, transport = new MemoryTransport(), storage }
     runtime,
     sync,
     storage: technicalStorage,
+    personalStorage,
     transport,
     windowTarget,
     documentTarget,
@@ -537,6 +567,48 @@ await check("Supabase adapter reuses auth and hard-locks clair_data to the test 
   assert.equal(Object.hasOwn(update.record, "revision"), false);
 });
 
+await check("Cloud transport requires the isolated personal-storage contract", async () => {
+  const transport = new MemoryTransport();
+  const missing = makeHarness({
+    values: { crLocal: "safe" },
+    transport,
+    personalStorage: null
+  });
+  const missingResult = await missing.runtime.syncNow("missing-storage-adapter");
+  assert.equal(missingResult.synced, false);
+  assert.match(missingResult.error, /clair-test-storage-unavailable/);
+  assert.deepEqual(missing.sync.values, { crLocal: "safe" });
+  assert.equal(transport.authCalls, 0);
+  assert.equal(transport.registerCalls.length, 0);
+  assert.equal(transport.listCalls.length, 0);
+  assert.equal(transport.writeCalls.length, 0);
+
+  const wrongProtocol = new FakePersonalStorage();
+  wrongProtocol.protocol = "clair-test-storage/legacy";
+  const mismatched = makeHarness({
+    values: { crLocal: "safe" },
+    transport: new MemoryTransport(),
+    personalStorage: wrongProtocol
+  });
+  const mismatchedResult = await mismatched.runtime.syncNow("wrong-storage-adapter");
+  assert.equal(mismatchedResult.synced, false);
+  assert.match(mismatchedResult.error, /clair-test-storage-unavailable/);
+  assert.deepEqual(mismatched.sync.values, { crLocal: "safe" });
+
+  const wrongSync = new FakeSync({ crLocal: "safe" });
+  wrongSync.storageAppId = "clair-repas";
+  const wrongSyncTransport = new MemoryTransport();
+  const syncMismatch = makeHarness({
+    transport: wrongSyncTransport,
+    sync: wrongSync
+  });
+  const syncMismatchResult = await syncMismatch.runtime.syncNow("wrong-sync-storage");
+  assert.equal(syncMismatchResult.synced, false);
+  assert.match(syncMismatchResult.error, /clair-sync-runtime-mismatch/);
+  assert.equal(wrongSyncTransport.authCalls, 0);
+  assert.equal(wrongSyncTransport.writeCalls.length, 0);
+});
+
 await check("No session stays local and performs no anonymous write", async () => {
   const transport = new MemoryTransport({ user: null });
   const harness = makeHarness({ values: { crLocal: "safe" }, transport });
@@ -746,11 +818,20 @@ await check("Technical metadata remains outside personal and cloud data", async 
   const harness = makeHarness({ values: { crOnly: "personal" } });
   await harness.runtime.syncNow("metadata-isolation");
   const metaKey = api.constants.META_STORAGE_KEY;
-  assert.equal(metaKey, "clair.v8.sync.meta.clair-repas-v8-test");
+  assert.equal(
+    metaKey,
+    "clair.v8.sync.meta.clair-repas-v8-test.test-storage-v1"
+  );
   assert.equal(harness.sync.valid({ [metaKey]: "x" }), false);
   assert.ok(harness.storage.getItem(metaKey));
+  assert.ok(harness.storage.getItem(api.constants.DEVICE_KEY_STORAGE));
   assert.equal(harness.transport.rows.has(metaKey), false);
   assert.ok([...harness.transport.rows.keys()].every((key) => key.startsWith("cr")));
+  assert.ok(
+    [...harness.transport.rows.keys()].every(
+      (key) => !key.startsWith(PERSONAL_PREFIX)
+    )
+  );
   assertOnlyTestApp(harness.transport);
 });
 
@@ -824,6 +905,7 @@ await check("Startup, local, foreground, online and periodic triggers stay async
     document: documentTarget,
     navigator: { onLine: true, userAgent: "Windows Chrome", platform: "Win32" },
     storage: new FakeStorage(),
+    personalStorage: new FakePersonalStorage(),
     crypto: webcrypto,
     sync,
     transport,
@@ -855,6 +937,14 @@ await check("Startup, local, foreground, online and periodic triggers stay async
     [4000, 60000]
   );
   assert.ok([...timers.values()].some((entry) => entry.delay === 0));
+
+  const timersBeforeRawProductionEvent = [...timers.entries()];
+  windowTarget.dispatch("storage", { key: "crProductionOnly" });
+  assert.deepEqual([...timers.entries()], timersBeforeRawProductionEvent);
+  windowTarget.dispatch("storage", { key: "clair.device.key.v1" });
+  assert.deepEqual([...timers.entries()], timersBeforeRawProductionEvent);
+  windowTarget.dispatch("storage", { key: PERSONAL_PREFIX + "crTrigger" });
+  assert.ok([...timers.values()].some((entry) => entry.delay === 300));
 
   windowTarget.dispatch("online");
   assert.ok([...timers.values()].some((entry) => entry.delay === 150));
