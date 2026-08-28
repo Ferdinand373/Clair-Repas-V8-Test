@@ -10,12 +10,16 @@ import vm from "node:vm";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const source = readFileSync(resolve(ROOT, "v8/clair-cloud-sync.js"), "utf8");
-const RELEASE = "8.0.0-foundation.10";
+const RELEASE = "8.0.0-foundation.11";
 const DATA_SCHEMA = 2;
 const CORE_REVISION = "sha256:test-core-revision";
 const TEST_APP_ID = "clair-repas-v8-test";
 const STORAGE_PROTOCOL = "clair-test-storage/v1";
 const PERSONAL_PREFIX = "clair.v8.test.personal.";
+const FAVORITES_KEY = "crFavMeals";
+const NOTES_KEY = "crRecipeNotesV31";
+const FOUR_FAVORITES = '["A","B","C","D"]';
+const TEST_NOTE = '{"recipe-A":"test V8"}';
 const successes = [];
 const failures = [];
 
@@ -227,7 +231,8 @@ class MemoryTransport {
         value: deletedAt ? null : value,
         source_device: "Autre appareil",
         synced_at: updatedAt,
-        integration: "clair-v8-foundation.10"
+        integration: options.integration || "clair-v8-foundation.11",
+        ...(options.mutation ? { mutation: structuredClone(options.mutation) } : {})
       },
       schema_version: DATA_SCHEMA,
       revision: options.revision ?? (current ? Number(current.revision) + 1 : 1),
@@ -283,15 +288,16 @@ function makeHarness({
   const technicalStorage = storage || new FakeStorage();
   const windowTarget = new FakeEventTarget();
   const documentTarget = new FakeEventTarget();
+  const navigatorState = {
+    onLine: true,
+    userAgent: "Mozilla/5.0 (Windows) Chrome/140.0",
+    platform: "Win32"
+  };
   let currentTime = Date.parse("2026-08-21T10:00:00.000Z");
   const runtime = api.createRuntime({
     window: windowTarget,
     document: documentTarget,
-    navigator: {
-      onLine: true,
-      userAgent: "Mozilla/5.0 (Windows) Chrome/140.0",
-      platform: "Win32"
-    },
+    navigator: navigatorState,
     storage: technicalStorage,
     personalStorage,
     crypto: webcrypto,
@@ -308,6 +314,7 @@ function makeHarness({
     transport,
     windowTarget,
     documentTarget,
+    navigatorState,
     advance(milliseconds = 1000) {
       currentTime += milliseconds;
       return new Date(currentTime).toISOString();
@@ -316,6 +323,45 @@ function makeHarness({
       return new Date(currentTime + milliseconds).toISOString();
     }
   };
+}
+
+async function seedAccountMeta(
+  harness,
+  key,
+  baseValue,
+  remoteRevision = 1,
+  options = {}
+) {
+  const basePresent = options.basePresent !== false;
+  const lastSyncedAt =
+    options.lastSyncedAt || "2026-08-20T10:00:00.000Z";
+  const entry = {
+    basePresent,
+    baseValue: basePresent ? baseValue : null,
+    localFingerprint: basePresent
+      ? await api.fingerprint(baseValue, webcrypto)
+      : null,
+    remoteRevision,
+    remoteUpdatedAt: options.remoteUpdatedAt || lastSyncedAt,
+    lastSyncedAt,
+    localChangedAt: options.localChangedAt || null
+  };
+  harness.storage.setItem(
+    api.constants.META_STORAGE_KEY,
+    JSON.stringify({
+      protocol: "clair-cloud-sync-meta/v1",
+      appId: TEST_APP_ID,
+      accounts: {
+        "user-test": {
+          userId: "user-test",
+          keys: { [key]: entry },
+          conflicts: {},
+          lastSyncAt: lastSyncedAt
+        }
+      }
+    })
+  );
+  return entry;
 }
 
 function assertOnlyTestApp(transport) {
@@ -629,7 +675,7 @@ await check("Local upload uses the raw value and test app_id", async () => {
   assert.equal(result.synced, true, JSON.stringify(result));
   const row = harness.transport.rows.get("crPrefs");
   assert.equal(row.payload.value, '{"mode":"local"}');
-  assert.equal(row.payload.integration, "clair-v8-foundation.10");
+  assert.equal(row.payload.integration, "clair-v8-foundation.11");
   assert.equal(row.payload.source_device, "Windows • Chrome");
   assert.equal(row.deleted_at, null);
   assert.equal(row.last_device_id, null);
@@ -678,10 +724,19 @@ await check("Deletion sends a tombstone and recreation clears it", async () => {
   await harness.runtime.syncNow("seed");
   delete harness.sync.values.crDraft;
   harness.advance(2000);
+  assert.equal(
+    harness.runtime.recordUserMutation("crDraft", { kind: "draft-delete" }),
+    true
+  );
   await harness.runtime.syncNow("delete");
   const tombstone = harness.transport.rows.get("crDraft");
   assert.ok(tombstone.deleted_at);
   assert.equal(tombstone.payload.value, null);
+  assert.equal(tombstone.payload.mutation.kind, "user-destructive");
+  assert.equal(
+    tombstone.payload.mutation.protocol,
+    api.constants.USER_MUTATION_PROTOCOL
+  );
   harness.sync.values.crDraft = "reborn";
   harness.advance(2000);
   await harness.runtime.syncNow("recreate");
@@ -690,6 +745,7 @@ await check("Deletion sends a tombstone and recreation clears it", async () => {
   assert.equal(recreated.payload.value, "reborn");
   assert.ok(Number(recreated.revision) > Number(tombstone.revision));
   assertOnlyTestApp(harness.transport);
+  harness.runtime.stop();
 });
 
 await check("First connection never lets old cloud data erase local data", async () => {
@@ -713,6 +769,439 @@ await check("First connection never lets old cloud data erase local data", async
   assert.equal(transport.rows.get("crImportant").deleted_at, null);
   assert.equal(transport.rows.get("crImportant").payload.value, "local-safe");
   assert.equal(transport.rows.get("crScalar").payload.value, "local-new");
+});
+
+await check("Local favorites survive startup sync against stale empty cloud state", async () => {
+  const transport = new MemoryTransport();
+  transport.putRemote(FAVORITES_KEY, "[]", {
+    revision: 1,
+    updatedAt: "2026-08-20T09:00:00.000Z",
+    integration: "clair-v8-foundation.10"
+  });
+  const beforeClose = makeHarness({
+    values: { [FAVORITES_KEY]: "[]" },
+    transport
+  });
+  await beforeClose.runtime.syncNow("seed-empty-base");
+
+  beforeClose.sync.values[FAVORITES_KEY] = FOUR_FAVORITES;
+  assert.equal(JSON.parse(beforeClose.sync.values[FAVORITES_KEY]).length, 4);
+
+  transport.putRemote(FAVORITES_KEY, "[]", {
+    revision: 2,
+    updatedAt: "2026-08-20T09:05:00.000Z",
+    integration: "clair-v8-foundation.10"
+  });
+  const reopened = makeHarness({
+    values: { ...beforeClose.sync.values },
+    transport,
+    storage: beforeClose.storage
+  });
+  assert.equal(reopened.sync.values[FAVORITES_KEY], FOUR_FAVORITES);
+
+  for (const reason of ["startup", "local-scan-4s", "foreground", "periodic"]) {
+    const result = await reopened.runtime.syncNow(reason);
+    assert.equal(result.synced, true, `${reason}: ${JSON.stringify(result)}`);
+    assert.equal(reopened.sync.values[FAVORITES_KEY], FOUR_FAVORITES, reason);
+    assert.equal(JSON.parse(reopened.sync.values[FAVORITES_KEY]).length, 4);
+  }
+  assert.equal(
+    transport.rows.get(FAVORITES_KEY).payload.value,
+    FOUR_FAVORITES
+  );
+  assert.equal(transport.rows.get(FAVORITES_KEY).deleted_at, null);
+});
+
+await check("Metadata-aligned favorites survive a stale empty remote revision", async () => {
+  const transport = new MemoryTransport();
+  transport.putRemote(FAVORITES_KEY, "[]", {
+    revision: 2,
+    updatedAt: "2026-08-20T09:05:00.000Z",
+    integration: "clair-v8-foundation.10"
+  });
+  const harness = makeHarness({
+    values: { [FAVORITES_KEY]: FOUR_FAVORITES },
+    transport
+  });
+  await seedAccountMeta(harness, FAVORITES_KEY, FOUR_FAVORITES, 1, {
+    lastSyncedAt: "2026-08-20T09:00:00.000Z"
+  });
+
+  const result = await harness.runtime.syncNow("startup-stale-empty");
+  assert.equal(result.synced, true, JSON.stringify(result));
+  assert.equal(harness.sync.values[FAVORITES_KEY], FOUR_FAVORITES);
+  assert.equal(transport.rows.get(FAVORITES_KEY).payload.value, FOUR_FAVORITES);
+  assert.equal(harness.runtime.getStatus().guardedLossCount, 1);
+  assert.equal(harness.runtime.getStatus().hasConflict, true);
+});
+
+await check("Local favorites survive stale remote tombstone without deletion proof", async () => {
+  const transport = new MemoryTransport();
+  transport.putRemote(FAVORITES_KEY, null, {
+    revision: 2,
+    updatedAt: "2026-08-20T09:05:00.000Z",
+    deletedAt: "2026-08-20T09:05:00.000Z",
+    integration: "clair-v8-foundation.10"
+  });
+  const harness = makeHarness({
+    values: { [FAVORITES_KEY]: FOUR_FAVORITES },
+    transport
+  });
+  await seedAccountMeta(harness, FAVORITES_KEY, FOUR_FAVORITES, 1);
+
+  await harness.runtime.syncNow("startup-old-tombstone");
+  assert.equal(harness.sync.values[FAVORITES_KEY], FOUR_FAVORITES);
+  assert.equal(transport.rows.get(FAVORITES_KEY).payload.value, FOUR_FAVORITES);
+  assert.equal(transport.rows.get(FAVORITES_KEY).deleted_at, null);
+});
+
+await check("Unjournaled local favorites outrank a technically newer tombstone", async () => {
+  const transport = new MemoryTransport();
+  transport.putRemote(FAVORITES_KEY, null, {
+    revision: 2,
+    updatedAt: "2026-08-21T10:05:00.000Z",
+    deletedAt: "2026-08-21T10:05:00.000Z"
+  });
+  const harness = makeHarness({
+    values: { [FAVORITES_KEY]: FOUR_FAVORITES },
+    transport
+  });
+  await seedAccountMeta(harness, FAVORITES_KEY, "[]", 1, {
+    lastSyncedAt: "2026-08-21T10:00:00.000Z"
+  });
+
+  await harness.runtime.syncNow("startup-unjournaled-local");
+  assert.equal(harness.sync.values[FAVORITES_KEY], FOUR_FAVORITES);
+  assert.equal(transport.rows.get(FAVORITES_KEY).payload.value, FOUR_FAVORITES);
+  assert.equal(transport.rows.get(FAVORITES_KEY).deleted_at, null);
+  assert.ok(
+    harness.sync.restoreCalls.every(
+      (call) => call[FAVORITES_KEY] === FOUR_FAVORITES
+    )
+  );
+});
+
+await check("Local recipe note survives stale remote sync", async () => {
+  const transport = new MemoryTransport();
+  transport.putRemote(NOTES_KEY, "{}", {
+    revision: 2,
+    updatedAt: "2026-08-20T09:05:00.000Z",
+    integration: "clair-v8-foundation.10"
+  });
+  const harness = makeHarness({
+    values: { [NOTES_KEY]: TEST_NOTE },
+    transport
+  });
+  await seedAccountMeta(harness, NOTES_KEY, TEST_NOTE, 1);
+
+  for (const reason of ["reload", "startup", "foreground", "sync"]) {
+    await harness.runtime.syncNow(reason);
+    assert.equal(harness.sync.values[NOTES_KEY], TEST_NOTE, reason);
+  }
+  assert.equal(transport.rows.get(NOTES_KEY).payload.value, TEST_NOTE);
+  assert.doesNotMatch(
+    JSON.stringify(harness.runtime.getStatus()),
+    /test V8/
+  );
+});
+
+await check("Causally proven voluntary favorite clear survives reload and converges", async () => {
+  const transport = new MemoryTransport();
+  const clientA = makeHarness({
+    values: { [FAVORITES_KEY]: FOUR_FAVORITES },
+    transport
+  });
+  await clientA.runtime.syncNow("client-a-seed");
+
+  const clientB = makeHarness({ transport });
+  await clientB.runtime.syncNow("client-b-download");
+  assert.equal(clientB.sync.values[FAVORITES_KEY], FOUR_FAVORITES);
+
+  clientB.advance(1000);
+  clientB.sync.values[FAVORITES_KEY] = "[]";
+  assert.equal(
+    clientB.runtime.recordUserMutation(FAVORITES_KEY, {
+      kind: "favorites-change"
+    }),
+    true
+  );
+  const persistedIntent = JSON.parse(
+    clientB.storage.getItem(api.constants.META_STORAGE_KEY)
+  ).pendingMutations[FAVORITES_KEY];
+  assert.equal(persistedIntent.protocol, api.constants.USER_MUTATION_PROTOCOL);
+  assert.equal(persistedIntent.userId, "user-test");
+  assert.equal(Object.hasOwn(persistedIntent, "resultValue"), false);
+  assert.match(persistedIntent.resultMarker, /^fnv1a:/);
+  clientB.navigatorState.onLine = false;
+  const offline = await clientB.runtime.syncNow("client-b-offline-clear");
+  assert.equal(offline.reason, "offline");
+  assert.equal(transport.rows.get(FAVORITES_KEY).payload.value, FOUR_FAVORITES);
+  clientB.runtime.stop();
+
+  const reloadedClientB = makeHarness({
+    values: { [FAVORITES_KEY]: "[]" },
+    transport,
+    storage: clientB.storage
+  });
+  reloadedClientB.advance(2000);
+  await reloadedClientB.runtime.syncNow("client-b-user-clear-after-reload");
+  const cleared = transport.rows.get(FAVORITES_KEY);
+  assert.equal(cleared.payload.value, "[]");
+  assert.equal(cleared.revision, 2);
+  assert.equal(cleared.payload.mutation.protocol, api.constants.USER_MUTATION_PROTOCOL);
+  assert.equal(cleared.payload.mutation.kind, "user-destructive");
+  assert.equal(cleared.payload.mutation.user_action, "favorites-change");
+  assert.equal(cleared.payload.mutation.base_revision, "1");
+
+  await clientA.runtime.syncNow("client-a-receive-user-clear");
+  assert.equal(clientA.sync.values[FAVORITES_KEY], "[]");
+  assert.equal(clientA.runtime.getStatus().guardedLossCount, 0);
+  assert.equal(
+    Object.hasOwn(
+      JSON.parse(
+        reloadedClientB.storage.getItem(api.constants.META_STORAGE_KEY)
+      ).pendingMutations,
+      FAVORITES_KEY
+    ),
+    false
+  );
+  clientA.runtime.stop();
+  reloadedClientB.runtime.stop();
+});
+
+await check("Causally proven voluntary key deletion still emits and applies a tombstone", async () => {
+  const transport = new MemoryTransport();
+  const clientA = makeHarness({
+    values: { crDraft: "important" },
+    transport
+  });
+  await clientA.runtime.syncNow("client-a-seed-key");
+  const clientB = makeHarness({ transport });
+  await clientB.runtime.syncNow("client-b-download-key");
+
+  clientB.advance(1000);
+  delete clientB.sync.values.crDraft;
+  assert.equal(
+    clientB.runtime.recordUserMutation("crDraft", { kind: "draft-delete" }),
+    true
+  );
+  await clientB.runtime.syncNow("client-b-user-delete");
+  const tombstone = transport.rows.get("crDraft");
+  assert.equal(tombstone.payload.value, null);
+  assert.ok(tombstone.deleted_at);
+  assert.equal(tombstone.payload.mutation.result_present, false);
+
+  await clientA.runtime.syncNow("client-a-receive-user-delete");
+  assert.equal(Object.hasOwn(clientA.sync.values, "crDraft"), false);
+  assert.equal(clientA.runtime.getStatus().guardedLossCount, 0);
+  clientA.runtime.stop();
+  clientB.runtime.stop();
+});
+
+await check("Malformed destructive proof cannot erase local favorites", async () => {
+  const transport = new MemoryTransport();
+  const clientA = makeHarness({
+    values: { [FAVORITES_KEY]: FOUR_FAVORITES },
+    transport
+  });
+  await clientA.runtime.syncNow("malformed-proof-seed");
+  const clientB = makeHarness({ transport });
+  await clientB.runtime.syncNow("malformed-proof-download");
+  clientB.advance(1000);
+  clientB.sync.values[FAVORITES_KEY] = "[]";
+  assert.equal(
+    clientB.runtime.recordUserMutation(FAVORITES_KEY, {
+      kind: "favorites-change"
+    }),
+    true
+  );
+  await clientB.runtime.syncNow("malformed-proof-create-valid-row");
+  transport.rows.get(FAVORITES_KEY).payload.mutation.result_present = "true";
+
+  await clientA.runtime.syncNow("malformed-proof-receive");
+  assert.equal(clientA.sync.values[FAVORITES_KEY], FOUR_FAVORITES);
+  assert.equal(transport.rows.get(FAVORITES_KEY).payload.value, FOUR_FAVORITES);
+  assert.equal(clientA.runtime.getStatus().guardedLossCount, 1);
+  clientA.runtime.stop();
+  clientB.runtime.stop();
+});
+
+await check("Persisted user intent is never reused by another account", async () => {
+  const originalTransport = new MemoryTransport();
+  const original = makeHarness({
+    values: { [FAVORITES_KEY]: FOUR_FAVORITES },
+    transport: originalTransport
+  });
+  await original.runtime.syncNow("intent-account-seed");
+  original.advance(1000);
+  original.sync.values[FAVORITES_KEY] = "[]";
+  assert.equal(
+    original.runtime.recordUserMutation(FAVORITES_KEY, {
+      kind: "favorites-change"
+    }),
+    true
+  );
+  original.runtime.stop();
+
+  const otherTransport = new MemoryTransport({
+    user: { id: "user-other" }
+  });
+  const other = makeHarness({
+    values: { [FAVORITES_KEY]: "[]" },
+    transport: otherTransport,
+    storage: original.storage
+  });
+  await other.runtime.syncNow("intent-account-switch");
+  const otherRow = otherTransport.rows.get(FAVORITES_KEY);
+  assert.equal(otherRow.payload.value, "[]");
+  assert.equal(Object.hasOwn(otherRow.payload, "mutation"), false);
+  const retained = JSON.parse(
+    other.storage.getItem(api.constants.META_STORAGE_KEY)
+  ).pendingMutations[FAVORITES_KEY];
+  assert.equal(retained.userId, "user-test");
+  other.runtime.stop();
+});
+
+await check("User intent recorded before auth sync is safely claimed after reload", async () => {
+  const transport = new MemoryTransport();
+  const seeded = makeHarness({
+    values: { [FAVORITES_KEY]: FOUR_FAVORITES },
+    transport
+  });
+  await seeded.runtime.syncNow("pre-auth-intent-seed");
+  const receiverStorage = new FakeStorage({
+    [api.constants.META_STORAGE_KEY]: seeded.storage.getItem(
+      api.constants.META_STORAGE_KEY
+    )
+  });
+  seeded.runtime.stop();
+
+  const beforeAuth = makeHarness({
+    values: { [FAVORITES_KEY]: "[]" },
+    transport,
+    storage: seeded.storage
+  });
+  assert.equal(
+    beforeAuth.runtime.recordUserMutation(FAVORITES_KEY, {
+      kind: "favorites-change"
+    }),
+    true
+  );
+  assert.equal(
+    JSON.parse(
+      beforeAuth.storage.getItem(api.constants.META_STORAGE_KEY)
+    ).pendingMutations[FAVORITES_KEY].userId,
+    null
+  );
+  beforeAuth.runtime.stop();
+
+  const reloaded = makeHarness({
+    values: { [FAVORITES_KEY]: "[]" },
+    transport,
+    storage: beforeAuth.storage
+  });
+  await reloaded.runtime.syncNow("pre-auth-intent-after-reload");
+  const row = transport.rows.get(FAVORITES_KEY);
+  assert.equal(row.payload.value, "[]");
+  assert.equal(row.payload.mutation.kind, "user-destructive");
+
+  const receiver = makeHarness({
+    values: { [FAVORITES_KEY]: FOUR_FAVORITES },
+    transport,
+    storage: receiverStorage
+  });
+  await receiver.runtime.syncNow("pre-auth-intent-receiver");
+  assert.equal(receiver.sync.values[FAVORITES_KEY], "[]");
+  reloaded.runtime.stop();
+  receiver.runtime.stop();
+});
+
+await check("User intent recorded before first sync is claimed in the same runtime", async () => {
+  const transport = new MemoryTransport();
+  const seeded = makeHarness({
+    values: { [FAVORITES_KEY]: FOUR_FAVORITES },
+    transport
+  });
+  await seeded.runtime.syncNow("same-runtime-claim-seed");
+  seeded.runtime.stop();
+
+  const beforeAuth = makeHarness({
+    values: { [FAVORITES_KEY]: "[]" },
+    transport,
+    storage: seeded.storage
+  });
+  assert.equal(
+    beforeAuth.runtime.recordUserMutation(FAVORITES_KEY, {
+      kind: "favorites-change"
+    }),
+    true
+  );
+  await beforeAuth.runtime.syncNow("same-runtime-claim-sync");
+  const row = transport.rows.get(FAVORITES_KEY);
+  assert.equal(row.payload.value, "[]");
+  assert.equal(row.payload.mutation.kind, "user-destructive");
+  beforeAuth.runtime.stop();
+});
+
+await check("Invalid or replayed deletion proof cannot erase local favorites", async () => {
+  const baseFingerprint = await api.fingerprint(FOUR_FAVORITES, webcrypto);
+  const emptyFingerprint = await api.fingerprint("[]", webcrypto);
+  const transport = new MemoryTransport();
+  transport.putRemote(FAVORITES_KEY, "[]", {
+    revision: 3,
+    updatedAt: "2026-08-21T10:01:00.000Z",
+    mutation: {
+      protocol: api.constants.USER_MUTATION_PROTOCOL,
+      kind: "user-destructive",
+      user_action: "favorites-change",
+      operation_id: "replayed-operation",
+      base_revision: 1,
+      base_present: true,
+      base_fingerprint: baseFingerprint,
+      result_present: true,
+      result_fingerprint: emptyFingerprint,
+      occurred_at: "2026-08-21T10:00:30.000Z",
+      recorded_at: "2026-08-21T10:01:00.000Z",
+      loss_kind: "array-reduction",
+      removed_items: 4
+    }
+  });
+  const harness = makeHarness({
+    values: { [FAVORITES_KEY]: FOUR_FAVORITES },
+    transport
+  });
+  await seedAccountMeta(harness, FAVORITES_KEY, FOUR_FAVORITES, 2, {
+    lastSyncedAt: "2026-08-21T10:00:00.000Z"
+  });
+
+  await harness.runtime.syncNow("replayed-proof");
+  assert.equal(harness.sync.values[FAVORITES_KEY], FOUR_FAVORITES);
+  assert.equal(transport.rows.get(FAVORITES_KEY).payload.value, FOUR_FAVORITES);
+  assert.equal(harness.runtime.getStatus().guardedLossCount, 1);
+});
+
+await check("Restore notifications and sync diagnostics expose no personal values", async () => {
+  const transport = new MemoryTransport();
+  transport.putRemote("crIncoming", "cloud-value");
+  const harness = makeHarness({ transport });
+  const events = [];
+  const unsubscribe = harness.runtime.subscribeLocalChanges((event) => {
+    events.push(event);
+  });
+
+  await harness.runtime.syncNow("diagnostic-restore");
+  assert.equal(events.length, 1);
+  assert.deepEqual([...events[0].keys], ["crIncoming"]);
+  assert.equal(events[0].source, "cloud-restore");
+  assert.deepEqual(Object.keys(events[0]).sort(), ["keys", "source"]);
+  const status = harness.runtime.getStatus();
+  assert.equal(status.phase, "synced");
+  assert.equal(status.reason, "diagnostic-restore");
+  assert.equal(status.localKeyCount, 1);
+  assert.equal(status.remoteKeyCount, 1);
+  assert.equal(status.hasConflict, false);
+  assert.doesNotMatch(JSON.stringify(status), /cloud-value/);
+  unsubscribe();
 });
 
 await check("Concurrent JSON objects and arrays merge non-destructively", async () => {
@@ -756,12 +1245,29 @@ await check("Concurrent JSON objects and arrays merge non-destructively", async 
     harness.storage.getItem(api.constants.META_STORAGE_KEY)
   );
   const archived = meta.accounts["user-test"].conflicts.crLeaf.at(-1);
-  assert.equal(archived.localValue, '{"note":"local"}');
-  assert.equal(archived.remoteValue, '{"note":"remote"}');
-  assert.deepEqual(archived.details[0].path, ["note"]);
+  assert.equal(archived.kind, "json-three-way");
+  assert.equal(archived.resolution, "local-preserved");
+  assert.equal(archived.detailCount, 1);
+  assert.equal(Object.hasOwn(archived, "localValue"), false);
+  assert.equal(Object.hasOwn(archived, "remoteValue"), false);
+  assert.doesNotMatch(JSON.stringify(archived), /\{\\"note\\"/);
 });
 
-await check("Newest scalar and newest delete win after a shared base", async () => {
+await check("Concurrent remote nested reduction cannot erase unchanged local data", () => {
+  const merged = api.mergePersonalStrings(
+    '{"notes":{"A":"test V8"},"local":0}',
+    '{"notes":{"A":"test V8"},"local":1}',
+    '{"notes":{},"local":0}',
+    true,
+    false
+  );
+  assert.deepEqual(JSON.parse(merged.value), {
+    local: 1,
+    notes: { A: "test V8" }
+  });
+});
+
+await check("Newest scalar wins but concurrent remote delete preserves local data", async () => {
   const harness = makeHarness({
     values: { crScalar: "base", crDeleteVsEdit: "base" }
   });
@@ -779,7 +1285,12 @@ await check("Newest scalar and newest delete win after a shared base", async () 
   });
   await harness.runtime.syncNow("scalar-conflict");
   assert.equal(harness.sync.values.crScalar, "remote-newest");
-  assert.equal(Object.hasOwn(harness.sync.values, "crDeleteVsEdit"), false);
+  assert.equal(harness.sync.values.crDeleteVsEdit, "local-edit");
+  assert.equal(
+    harness.transport.rows.get("crDeleteVsEdit").payload.value,
+    "local-edit"
+  );
+  assert.equal(harness.runtime.getStatus().hasConflict, true);
 });
 
 await check("Network and local restore failures preserve the local before-image", async () => {

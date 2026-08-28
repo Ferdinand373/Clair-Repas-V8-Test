@@ -1,7 +1,7 @@
 {
   "platform": "Clair V8",
   "app": "clair-repas",
-  "foundationVersion": "8.0.0-foundation.10",
+  "foundationVersion": "8.0.0-foundation.11",
   "productVersion": "7.5",
   "dataSchema": 2,
   "channel": "foundation-lab-stable",

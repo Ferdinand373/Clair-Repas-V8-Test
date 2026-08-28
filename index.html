@@ -4159,6 +4159,9 @@ const LEARNING_CHOICE_LIMIT=120;
 const CHOICE_DEDUPLICATION_MS=6*60*60*1000;
 const DISCOVERY_RATE=0.18;
 const V39_DATA_MIGRATION_KEY='crRecipeIdMigrationV39';
+function recordLocalPersonalMutation(key,kind='user-change'){
+  try{window.ClairCloudSync?.recordUserMutation?.(key,{kind})}catch(e){}
+}
 function mergeV39MigratedValue(current,incoming,key=''){
   if(current===undefined)return incoming;
   if(Array.isArray(current)&&Array.isArray(incoming))return[...current,...incoming];
@@ -4243,6 +4246,7 @@ function refreshFavoriteCache(){
 function writeIdList(key,values){
   window.ClairStorage.setItem(key,JSON.stringify([...new Set(values)]));
   if(key===FAVORITES_KEY)V73_FAVORITES_RAW=null;
+  recordLocalPersonalMutation(key,key===FAVORITES_KEY?'favorites-change':'id-list-change');
 }
 function favoriteIds(){refreshFavoriteCache();return[...V73_FAVORITES_IDS]}
 function favoriteSet(){refreshFavoriteCache();return new Set(V73_FAVORITES_SET)}
@@ -4277,9 +4281,11 @@ function recipeNote(id){refreshRecipeNoteCache();return V73_NOTES_MAP[id]||''}
 function saveRecipeNote(id,value){
   if(!recipeIndex.has(id))return;
   const notes=recipeNoteMap();
+  const hadNote=Boolean(String(notes[id]||'').trim());
   const clean=String(value??'').slice(0,2000);
   if(clean.trim())notes[id]=clean;else delete notes[id];
   window.ClairStorage.setItem(RECIPE_NOTES_KEY,JSON.stringify(notes));
+  recordLocalPersonalMutation(RECIPE_NOTES_KEY,hadNote&&!clean.trim()?'recipe-note-delete':'recipe-note-edit');
   V73_NOTES_RAW=null;
   updateNoteIndicators(id);
 }
@@ -4305,6 +4311,7 @@ function recipeReaction(id){refreshReactionCache();return V73_REACTIONS_MAP[id]|
 function writeReactionMap(values){
   const clean=Object.fromEntries(Object.entries(values||{}).filter(([id,value])=>recipeIndex.has(id)&&['again','notForMe'].includes(value)));
   window.ClairStorage.setItem(REACTIONS_KEY,JSON.stringify(clean));
+  recordLocalPersonalMutation(REACTIONS_KEY,'reaction-change');
   V73_REACTIONS_RAW=null;
 }
 const RECIPE_USAGE_TYPES=['mid','eve','starter','dessert'];
@@ -4422,6 +4429,8 @@ function updateReactionUI(){
 function resetLearnedPreferences(){
   window.ClairStorage.removeItem(REACTIONS_KEY);
   window.ClairStorage.removeItem(LEARNING_KEY);
+  recordLocalPersonalMutation(REACTIONS_KEY,'preferences-reset');
+  recordLocalPersonalMutation(LEARNING_KEY,'preferences-reset');
   updateReactionUI();
   show('Préférences réinitialisées · favoris conservés');
 }
@@ -7920,6 +7929,23 @@ function updateFavoriteUI(){
   if(professional)professional.textContent=`${favorites.size} ${favorites.size===1?'favori':'favoris'}`;
   updateLikedButton();
 }
+function refreshCloudSyncedPersonalUI(event){
+  const keys=new Set(Array.isArray(event?.keys)?event.keys:[]);
+  if(keys.has(FAVORITES_KEY)){
+    V73_FAVORITES_RAW=null;
+    if(browserMode==='favorites'&&!$('recipeBrowser').hidden)renderRecipeBrowser();
+    else updateFavoriteUI();
+    refreshProfessionalStatus();
+  }
+  if(keys.has(RECIPE_NOTES_KEY)){
+    V73_NOTES_RAW=null;
+    const notes=recipeNoteMap();
+    document.querySelectorAll('.recipe-note-input[data-recipe-id]').forEach(input=>{
+      if(input!==document.activeElement)input.value=notes[input.dataset.recipeId]||'';
+      updateNoteIndicators(input.dataset.recipeId);
+    });
+  }
+}
 function toggleFavorite(id){
   if(!recipeIndex.has(id))return;
   const favorites=favoriteSet();
@@ -8058,6 +8084,7 @@ function timerClock(seconds){
 function saveTimer(){
   if(kitchenTimer)window.ClairStorage.setItem(TIMER_KEY,JSON.stringify(kitchenTimer));
   else window.ClairStorage.removeItem(TIMER_KEY);
+  recordLocalPersonalMutation(TIMER_KEY,kitchenTimer?'timer-change':'timer-delete');
 }
 function updateTimerUI(){
   const bar=$('kitchenTimer');
@@ -8900,6 +8927,7 @@ $('welcomeV6Start').onclick=()=>closeV6Welcome(false);
 $('welcomeV6More').onclick=()=>closeV6Welcome(true);
 $('welcomeV6').onclick=event=>{if(event.target===$('welcomeV6'))closeV6Welcome(false)};
 
+window.ClairCloudSync?.subscribeLocalChanges?.(refreshCloudSyncedPersonalUI);
 loadOrCreate();
 refreshProfessionalStatus();
 refreshV73HealthStatus();

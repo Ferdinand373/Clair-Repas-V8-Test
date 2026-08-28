@@ -3,7 +3,7 @@
 
   const script = document.currentScript;
   const LOCAL_APP_ID = script?.dataset?.clairApp || 'clair';
-  const RELEASE = script?.dataset?.clairRelease || '8.0.0-foundation.10';
+  const RELEASE = script?.dataset?.clairRelease || '8.0.0-foundation.11';
   const DATA_SCHEMA = Number(script?.dataset?.clairSchema || 2);
   const CORE_REVISION = script?.dataset?.clairCore || '';
 
@@ -11,7 +11,8 @@
   const META_PROTOCOL = 'clair-cloud-sync-meta/v1';
   const CLOUD_APP_ID = 'clair-repas-v8-test';
   const STORAGE_PROTOCOL = 'clair-test-storage/v1';
-  const INTEGRATION = 'clair-v8-foundation.10';
+  const INTEGRATION = 'clair-v8-foundation.11';
+  const USER_MUTATION_PROTOCOL = 'clair-user-mutation/v1';
   // Start a fresh technical history for the isolated personal namespace. The
   // previous metadata may describe production-origin cr... values and must not
   // generate deletions or uploads in the test bucket.
@@ -85,10 +86,26 @@
     remoteValue,
     preferLocal,
     conflicts = [],
-    path = []
+    path = [],
+    allowRemoteDeletion = true
   ) {
     if (sameJson(localValue, remoteValue)) return cloneJson(localValue);
-    if (sameJson(localValue, baseValue)) return cloneJson(remoteValue);
+    if (sameJson(localValue, baseValue)) {
+      if (!allowRemoteDeletion && localValue !== MISSING) {
+        if (remoteValue === MISSING) return cloneJson(localValue);
+        const remoteLosesData =
+          missingJsonWeight(localValue, remoteValue) > 0;
+        if (!remoteLosesData) return cloneJson(remoteValue);
+        const compatibleContainers =
+          (Array.isArray(localValue) && Array.isArray(remoteValue)) ||
+          (isPlainObject(localValue) && isPlainObject(remoteValue));
+        if (!compatibleContainers) return cloneJson(localValue);
+        // Continue into the recursive/array merge so additions are accepted
+        // while every unproven nested reduction remains local-first.
+      } else {
+        return cloneJson(remoteValue);
+      }
+    }
     if (sameJson(remoteValue, baseValue)) return cloneJson(localValue);
 
     if (localValue === MISSING) {
@@ -98,6 +115,9 @@
     }
 
     if (remoteValue === MISSING) {
+      if (!allowRemoteDeletion && localValue !== MISSING) {
+        return cloneJson(localValue);
+      }
       if (baseValue === MISSING) return cloneJson(localValue);
       return sameJson(localValue, baseValue) ? MISSING : cloneJson(localValue);
     }
@@ -126,7 +146,8 @@
           remoteChild,
           preferLocal,
           conflicts,
-          [...path, key]
+          [...path, key],
+          allowRemoteDeletion
         );
         if (merged !== MISSING) result[key] = merged;
       }
@@ -152,7 +173,13 @@
     }
   }
 
-  function mergePersonalStrings(baseRaw, localRaw, remoteRaw, preferLocal) {
+  function mergePersonalStrings(
+    baseRaw,
+    localRaw,
+    remoteRaw,
+    preferLocal,
+    allowRemoteDeletion = true
+  ) {
     const localValue = parseJsonContainer(localRaw);
     const remoteValue = parseJsonContainer(remoteRaw);
     const bothArrays = Array.isArray(localValue) && Array.isArray(remoteValue);
@@ -178,7 +205,9 @@
       localValue,
       remoteValue,
       preferLocal,
-      conflicts
+      conflicts,
+      [],
+      allowRemoteDeletion
     );
     return {
       mergeable: true,
@@ -204,11 +233,28 @@
     return 'fnv1a:' + (hash >>> 0).toString(16).padStart(8, '0');
   }
 
+  function mutationResultMarker(present, value) {
+    if (!present) return null;
+    const bytes = new TextEncoder().encode(String(value));
+    let hash = 0x811c9dc5;
+    for (const byte of bytes) {
+      hash ^= byte;
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return (
+      'fnv1a:' +
+      (hash >>> 0).toString(16).padStart(8, '0') +
+      ':' +
+      bytes.length
+    );
+  }
+
   function freshMetaRoot() {
     return {
       protocol: META_PROTOCOL,
       appId: CLOUD_APP_ID,
-      accounts: {}
+      accounts: {},
+      pendingMutations: {}
     };
   }
 
@@ -220,7 +266,12 @@
         parsed.protocol === META_PROTOCOL &&
         parsed.appId === CLOUD_APP_ID &&
         isPlainObject(parsed.accounts)
-      ) return parsed;
+      ) {
+        if (!isPlainObject(parsed.pendingMutations)) {
+          parsed.pendingMutations = {};
+        }
+        return parsed;
+      }
     } catch (_) {}
     return freshMetaRoot();
   }
@@ -311,6 +362,91 @@
       throw new Error('invalid-remote-payload:' + String(row.data_key || 'unknown'));
     }
     return { present: true, value };
+  }
+
+  function jsonWeight(value) {
+    if (Array.isArray(value)) {
+      return value.reduce((total, item) => total + Math.max(1, jsonWeight(item)), 0);
+    }
+    if (isPlainObject(value)) {
+      return Object.values(value).reduce(
+        (total, child) => total + Math.max(1, jsonWeight(child)),
+        0
+      );
+    }
+    return value === null || value === '' ? 0 : 1;
+  }
+
+  function missingJsonWeight(localValue, remoteValue) {
+    if (Array.isArray(localValue)) {
+      if (!Array.isArray(remoteValue)) return Math.max(1, jsonWeight(localValue));
+      const remoteItems = new Set(remoteValue.map(stableJson));
+      return localValue.reduce(
+        (total, item) => total + (remoteItems.has(stableJson(item)) ? 0 : Math.max(1, jsonWeight(item))),
+        0
+      );
+    }
+    if (isPlainObject(localValue)) {
+      if (!isPlainObject(remoteValue)) return Math.max(1, jsonWeight(localValue));
+      return Object.entries(localValue).reduce((total, [key, child]) => {
+        if (!own(remoteValue, key)) return total + Math.max(1, jsonWeight(child));
+        return total + missingJsonWeight(child, remoteValue[key]);
+      }, 0);
+    }
+    if (
+      typeof localValue === 'string' &&
+      localValue.trim() &&
+      (typeof remoteValue !== 'string' || !remoteValue.trim())
+    ) return 1;
+    return 0;
+  }
+
+  function lossProfile(localPresent, localRaw, remotePresent, remoteRaw) {
+    if (!localPresent) {
+      return {
+        destructive: false,
+        kind: 'none',
+        localItems: 0,
+        remoteItems: remotePresent ? 1 : 0,
+        missingItems: 0
+      };
+    }
+    if (!remotePresent) {
+      const parsedLocal = parseJsonContainer(localRaw);
+      return {
+        destructive: true,
+        kind: 'key-deletion',
+        localItems: parsedLocal ? jsonWeight(parsedLocal) : (String(localRaw || '').trim() ? 1 : 0),
+        remoteItems: 0,
+        missingItems: Math.max(1, parsedLocal ? jsonWeight(parsedLocal) : 1)
+      };
+    }
+
+    const localValue = parseJsonContainer(localRaw);
+    const remoteValue = parseJsonContainer(remoteRaw);
+    if (localValue) {
+      const missingItems = missingJsonWeight(localValue, remoteValue);
+      return {
+        destructive: missingItems > 0,
+        kind: missingItems > 0
+          ? (Array.isArray(localValue) ? 'array-reduction' : 'object-reduction')
+          : 'none',
+        localItems: jsonWeight(localValue),
+        remoteItems: remoteValue ? jsonWeight(remoteValue) : 0,
+        missingItems
+      };
+    }
+
+    const localText = String(localRaw || '');
+    const remoteText = String(remoteRaw || '');
+    const cleared = Boolean(localText.trim() && !remoteText.trim());
+    return {
+      destructive: cleared,
+      kind: cleared ? 'value-cleared' : 'none',
+      localItems: localText.trim() ? 1 : 0,
+      remoteItems: remoteText.trim() ? 1 : 0,
+      missingItems: cleared ? 1 : 0
+    };
   }
 
   class SyncConflictError extends Error {
@@ -501,6 +637,12 @@
       lastAttemptAt: null,
       lastSuccessAt: null,
       lastError: null,
+      localKeyCount: 0,
+      remoteKeyCount: 0,
+      conflictCount: 0,
+      hasConflict: false,
+      guardedLossCount: 0,
+      lastGuard: null,
       metaPersisted: true,
       started: false
     };
@@ -516,6 +658,10 @@
     let transportPromise = null;
     let unsubscribeAuth = null;
     let authSubscriptionAttached = false;
+    let activeUserId = null;
+    let authBoundaryObserved = false;
+    const localMutationIntents = new Map();
+    const localChangeSubscribers = new Set();
 
     function isoNow() {
       return new Date(now()).toISOString();
@@ -523,6 +669,87 @@
 
     function setState(next) {
       Object.assign(state, next);
+    }
+
+    function notifyLocalChanges(keys, source) {
+      const uniqueKeys = [...new Set(keys)].filter((key) => isPersonalKey(sync, key));
+      if (!uniqueKeys.length) return;
+      const event = Object.freeze({ keys: uniqueKeys, source });
+      for (const callback of [...localChangeSubscribers]) {
+        try {
+          callback(event);
+        } catch (_) {}
+      }
+    }
+
+    function subscribeLocalChanges(callback) {
+      if (typeof callback !== 'function') return () => {};
+      localChangeSubscribers.add(callback);
+      return () => localChangeSubscribers.delete(callback);
+    }
+
+    function recordUserMutation(key, details = {}) {
+      if (!isPersonalKey(sync, key)) return false;
+      let values;
+      try {
+        values = captureLocal();
+      } catch (_) {
+        return false;
+      }
+      const kind = String(details.kind || 'user-change').slice(0, 64);
+      const occurredAt = isoNow();
+      const resultPresent = own(values, key);
+      const intent = {
+        protocol: USER_MUTATION_PROTOCOL,
+        userId: activeUserId,
+        kind,
+        occurredAt,
+        resultPresent,
+        resultMarker: mutationResultMarker(
+          resultPresent,
+          resultPresent ? values[key] : null
+        )
+      };
+      localMutationIntents.set(key, intent);
+      const metaRoot = readMetaRoot(storage);
+      metaRoot.pendingMutations[key] = intent;
+      state.metaPersisted = writeMetaRoot(storage, metaRoot);
+      if (!state.metaPersisted) {
+        state.lastError = 'user-mutation-intent-persistence-failed';
+      }
+      localChangeTimes.set(key, occurredAt);
+      scheduleSync('user-mutation', Number(details.delay) || 120);
+      return state.metaPersisted;
+    }
+
+    function loadPersistedMutationIntents(metaRoot, userId, claimUnscoped) {
+      for (const [key, storedCandidate] of Object.entries(metaRoot.pendingMutations)) {
+        let candidate = storedCandidate;
+        const valid =
+          isPersonalKey(sync, key) &&
+          isPlainObject(candidate) &&
+          candidate.protocol === USER_MUTATION_PROTOCOL &&
+          (candidate.userId === null || typeof candidate.userId === 'string') &&
+          typeof candidate.kind === 'string' &&
+          candidate.kind.length > 0 &&
+          candidate.kind.length <= 64 &&
+          Number.isFinite(Date.parse(candidate.occurredAt || '')) &&
+          typeof candidate.resultPresent === 'boolean' &&
+          (candidate.resultPresent
+            ? /^fnv1a:[a-f0-9]{8}:\d+$/.test(candidate.resultMarker || '')
+            : candidate.resultMarker === null);
+        if (!valid) {
+          delete metaRoot.pendingMutations[key];
+          continue;
+        }
+        if (candidate.userId === null && claimUnscoped) {
+          candidate = { ...candidate, userId };
+          metaRoot.pendingMutations[key] = candidate;
+        }
+        if (candidate.userId === userId) {
+          localMutationIntents.set(key, { ...candidate });
+        }
+      }
     }
 
     function snapshotSignature(values) {
@@ -599,6 +826,9 @@
       unsubscribeAuth = transport.subscribeAuth?.((signedIn) => {
         if (signedIn) scheduleSync('auth-session', 100);
         else {
+          activeUserId = null;
+          authBoundaryObserved = true;
+          localMutationIntents.clear();
           setState({
             phase: 'local-only',
             reason: 'no-session',
@@ -709,6 +939,167 @@
       };
     }
 
+    async function buildUserMutationProof(
+      key,
+      present,
+      value,
+      expectedRow,
+      intent,
+      syncedAt
+    ) {
+      if (!intent || !expectedRow) return null;
+      if (
+        intent.protocol !== USER_MUTATION_PROTOCOL ||
+        Boolean(intent.resultPresent) !== Boolean(present) ||
+        intent.resultMarker !== mutationResultMarker(present, value)
+      ) return null;
+      const before = liveRemoteValue(expectedRow);
+      const loss = lossProfile(before.present, before.value, present, value);
+      if (!loss.destructive) return null;
+      const baseFingerprint = before.present
+        ? await fingerprint(before.value, cryptoApi)
+        : null;
+      const resultFingerprint = present
+        ? await fingerprint(value, cryptoApi)
+        : null;
+      const operationFingerprint = await fingerprint(
+        [
+          key,
+          intent.occurredAt,
+          normalizeRevision(expectedRow.revision),
+          baseFingerprint,
+          present,
+          resultFingerprint
+        ].join('|'),
+        cryptoApi
+      );
+      return {
+        protocol: USER_MUTATION_PROTOCOL,
+        kind: 'user-destructive',
+        user_action: intent.kind,
+        operation_id: operationFingerprint.slice(0, 31),
+        base_revision: normalizeRevision(expectedRow.revision),
+        base_present: before.present,
+        base_fingerprint: baseFingerprint,
+        result_present: present,
+        result_fingerprint: resultFingerprint,
+        occurred_at: intent.occurredAt,
+        recorded_at: syncedAt,
+        loss_kind: loss.kind,
+        removed_items: loss.missingItems
+      };
+    }
+
+    async function validRemoteDestructiveProof(
+      row,
+      entry,
+      remotePresent,
+      remoteValue
+    ) {
+      const proof = row?.payload?.mutation;
+      if (
+        row?.payload?.integration !== INTEGRATION ||
+        !isPlainObject(proof) ||
+        proof.protocol !== USER_MUTATION_PROTOCOL ||
+        proof.kind !== 'user-destructive' ||
+        typeof proof.user_action !== 'string' ||
+        proof.user_action.length === 0 ||
+        proof.user_action.length > 64 ||
+        !/^sha256:[a-f0-9]{24}$/.test(proof.operation_id || '') ||
+        typeof proof.base_present !== 'boolean' ||
+        typeof proof.result_present !== 'boolean' ||
+        normalizeRevision(proof.base_revision) !==
+          normalizeRevision(entry.remoteRevision) ||
+        proof.base_present !== Boolean(entry.basePresent) ||
+        proof.base_fingerprint !== entry.localFingerprint ||
+        proof.result_present !== remotePresent
+      ) return false;
+
+      const baseRevision = Number(proof.base_revision);
+      const resultRevision = Number(row?.revision);
+      if (
+        !Number.isSafeInteger(baseRevision) ||
+        !Number.isSafeInteger(resultRevision) ||
+        resultRevision !== baseRevision + 1
+      ) return false;
+
+      const occurredAt = Date.parse(proof.occurred_at || '');
+      const recordedAt = Date.parse(proof.recorded_at || '');
+      if (
+        !Number.isFinite(occurredAt) ||
+        !Number.isFinite(recordedAt) ||
+        occurredAt > recordedAt ||
+        proof.recorded_at !== row?.payload?.synced_at
+      ) {
+        return false;
+      }
+
+      const resultFingerprint = remotePresent
+        ? await fingerprint(remoteValue, cryptoApi)
+        : null;
+      if (proof.result_fingerprint !== resultFingerprint) return false;
+
+      const loss = lossProfile(
+        Boolean(entry.basePresent),
+        entry.baseValue,
+        remotePresent,
+        remoteValue
+      );
+      if (
+        !loss.destructive ||
+        proof.loss_kind !== loss.kind ||
+        proof.removed_items !== loss.missingItems
+      ) return false;
+
+      const operationFingerprint = await fingerprint(
+        [
+          row.data_key,
+          proof.occurred_at,
+          normalizeRevision(proof.base_revision),
+          proof.base_fingerprint,
+          remotePresent,
+          resultFingerprint
+        ].join('|'),
+        cryptoApi
+      );
+      return proof.operation_id === operationFingerprint.slice(0, 31);
+    }
+
+    function rememberBlockedLoss(account, key, row, loss, syncedAt, reason) {
+      const history = Array.isArray(account.conflicts[key])
+        ? account.conflicts[key]
+        : [];
+      history.push({
+        at: syncedAt,
+        kind: 'unsafe-remote-destruction-blocked',
+        resolution: 'local-preserved',
+        reason,
+        remoteRevision: normalizeRevision(row?.revision),
+        lossKind: loss.kind,
+        localItems: loss.localItems,
+        remoteItems: loss.remoteItems,
+        missingItems: loss.missingItems
+      });
+      account.conflicts[key] = history.slice(-3);
+      setState({
+        guardedLossCount: state.guardedLossCount + 1,
+        lastGuard: {
+          at: syncedAt,
+          kind: loss.kind,
+          remoteRevision: normalizeRevision(row?.revision),
+          reason
+        }
+      });
+    }
+
+    function updateConflictState(account) {
+      const conflictCount = Object.values(account.conflicts).reduce(
+        (total, history) => total + (Array.isArray(history) ? history.length : 0),
+        0
+      );
+      setState({ conflictCount, hasConflict: conflictCount > 0 });
+    }
+
     function rememberJsonConflict(
       account,
       key,
@@ -725,10 +1116,10 @@
       history.push({
         at: syncedAt,
         kind: 'json-three-way',
-        localValue,
-        remoteValue,
-        resolvedValue,
-        details: merged.conflicts
+        resolution: resolvedValue === localValue
+          ? 'local-preserved'
+          : (resolvedValue === remoteValue ? 'remote-preserved' : 'merged'),
+        detailCount: merged.conflicts.length
       });
       account.conflicts[key] = history.slice(-3);
     }
@@ -740,9 +1131,18 @@
       key,
       present,
       value,
-      expectedRow
+      expectedRow,
+      intent = null
     ) {
       const syncedAt = isoNow();
+      const mutation = await buildUserMutationProof(
+        key,
+        present,
+        value,
+        expectedRow,
+        intent,
+        syncedAt
+      );
       return transport.writeData(
         {
           user_id: user.id,
@@ -752,7 +1152,8 @@
             value: present ? value : null,
             source_device: device.label,
             synced_at: syncedAt,
-            integration: INTEGRATION
+            integration: INTEGRATION,
+            ...(mutation ? { mutation } : {})
           },
           schema_version: DATA_SCHEMA,
           last_device_id: device.id,
@@ -887,7 +1288,10 @@
           key,
           localPresent,
           localValue,
-          row
+          row,
+          localMutationIntents.get(key)?.userId === user.id
+            ? localMutationIntents.get(key)
+            : null
         );
         account.keys[key] = await finalEntry(
           localValues,
@@ -912,14 +1316,48 @@
             );
           }
         } else {
-          localValues = await applyLocalState(
-            localValues,
-            key,
+          const loss = lossProfile(
+            localPresent,
+            localValue,
             remotePresent,
-            remoteValue,
-            mutationJournal,
-            concurrentKeys
+            remoteValue
           );
+          const causallySafe =
+            !loss.destructive ||
+            await validRemoteDestructiveProof(
+              row,
+              entry,
+              remotePresent,
+              remoteValue
+            );
+          if (!causallySafe) {
+            rememberBlockedLoss(
+              account,
+              key,
+              row,
+              loss,
+              syncedAt,
+              'remote-loss-without-causal-user-proof'
+            );
+            row = await uploadState(
+              transport,
+              user,
+              device,
+              key,
+              localPresent,
+              localValue,
+              row
+            );
+          } else {
+            localValues = await applyLocalState(
+              localValues,
+              key,
+              remotePresent,
+              remoteValue,
+              mutationJournal,
+              concurrentKeys
+            );
+          }
         }
         account.keys[key] = await finalEntry(
           localValues,
@@ -962,7 +1400,8 @@
             entry.basePresent ? entry.baseValue : null,
             localValue,
             remoteValue,
-            preferLocal
+            preferLocal,
+            false
           );
           const resolvedValue = merged.value;
           rememberJsonConflict(
@@ -1020,28 +1459,24 @@
           );
         }
       } else if (localPresent && !remotePresent) {
-        const localModificationWins =
-          localChangedAt === 0 || localChangedAt >= remoteChangedAt;
-        if (localModificationWins) {
-          row = await uploadState(
-            transport,
-            user,
-            device,
-            key,
-            true,
-            localValue,
-            row
-          );
-        } else {
-          localValues = await applyLocalState(
-            localValues,
-            key,
-            false,
-            null,
-            mutationJournal,
-            concurrentKeys
-          );
-        }
+        const loss = lossProfile(true, localValue, false, null);
+        rememberBlockedLoss(
+          account,
+          key,
+          row,
+          loss,
+          syncedAt,
+          'concurrent-local-data-outranks-remote-deletion'
+        );
+        row = await uploadState(
+          transport,
+          user,
+          device,
+          key,
+          true,
+          localValue,
+          row
+        );
       }
 
       account.keys[key] = await finalEntry(
@@ -1083,6 +1518,7 @@
 
       const localCapture = captureLocal();
       let localValues = { ...localCapture };
+      setState({ localKeyCount: Object.keys(localValues).length });
       const mutationJournal = new Map();
       const concurrentKeys = new Set();
       const processedKeys = new Set();
@@ -1098,6 +1534,9 @@
         ensureAuthSubscription(transport);
         const user = await transport.getAuthenticatedUser();
         if (!user?.id) {
+          activeUserId = null;
+          authBoundaryObserved = true;
+          localMutationIntents.clear();
           setState({
             phase: 'local-only',
             reason: 'no-session',
@@ -1106,6 +1545,12 @@
           });
           return { synced: false, reason: 'no-session' };
         }
+        const claimUnscoped = activeUserId === null && !authBoundaryObserved;
+        if (activeUserId && activeUserId !== user.id) {
+          authBoundaryObserved = true;
+          localMutationIntents.clear();
+        }
+        activeUserId = user.id;
 
         setState({
           phase: 'syncing',
@@ -1131,13 +1576,20 @@
             isPersonalKey(sync, row.data_key)
           ) remoteMap.set(row.data_key, row);
         }
+        setState({ remoteKeyCount: remoteMap.size });
 
         const metaRoot = readMetaRoot(storage);
+        loadPersistedMutationIntents(metaRoot, user.id, claimUnscoped);
         const account = accountMeta(metaRoot, user.id);
+        const persistedIntentKeys = Object.entries(metaRoot.pendingMutations)
+          .filter(([, candidate]) => candidate?.userId === user.id)
+          .map(([key]) => key);
         const keys = new Set([
           ...Object.keys(localValues),
           ...remoteMap.keys(),
-          ...Object.keys(account.keys)
+          ...Object.keys(account.keys),
+          ...persistedIntentKeys,
+          ...localMutationIntents.keys()
         ]);
 
         for (const key of [...keys].sort()) {
@@ -1165,18 +1617,29 @@
         noteConcurrentChanges(localValues, finalLocalValues, concurrentKeys);
         localValues = finalLocalValues;
         account.lastSyncAt = isoNow();
-        persistMeta(metaRoot);
+        updateConflictState(account);
         for (const key of processedKeys) {
-          if (!concurrentKeys.has(key)) localChangeTimes.delete(key);
+          if (!concurrentKeys.has(key)) {
+            localChangeTimes.delete(key);
+            localMutationIntents.delete(key);
+            const pending = metaRoot.pendingMutations[key];
+            if (pending?.userId === user.id || pending?.userId === null) {
+              delete metaRoot.pendingMutations[key];
+            }
+          }
         }
+        persistMeta(metaRoot);
         lastObservedSignature = snapshotSignature(localValues);
         lastObservedValues = { ...localValues };
+        notifyLocalChanges([...mutationJournal.keys()], 'cloud-restore');
         setState({
           phase: 'synced',
           reason,
           authenticated: true,
           lastSuccessAt: account.lastSyncAt,
-          lastError: null
+          lastError: null,
+          localKeyCount: Object.keys(localValues).length,
+          remoteKeyCount: remoteMap.size
         });
         if (concurrentKeys.size) {
           scheduleSync('concurrent-local-change', 250);
@@ -1269,6 +1732,7 @@
         }
         const logical = personalStorage.logicalKey?.(event.key) ?? null;
         if (logical && isPersonalKey(sync, logical)) {
+          notifyLocalChanges([logical], 'storage');
           markDirty(logical, 'storage', 300);
         }
       };
@@ -1337,6 +1801,7 @@
       if (periodicInterval !== null) cancelInterval(periodicInterval);
       detachTriggers?.();
       unsubscribeAuth?.();
+      localChangeSubscribers.clear();
       setState({ phase: 'stopped', reason: 'stopped' });
     }
 
@@ -1346,10 +1811,15 @@
       supabaseVersion: '2.111.0',
       syncNow,
       markDirty,
+      recordUserMutation,
+      subscribeLocalChanges,
       start,
       stop,
       getStatus() {
-        return { ...state };
+        return {
+          ...state,
+          lastGuard: state.lastGuard ? { ...state.lastGuard } : null
+        };
       }
     });
   }
@@ -1362,11 +1832,13 @@
       loadSupabaseLibrary,
       mergePersonalStrings,
       fingerprint,
+      lossProfile,
       constants: Object.freeze({
         CLOUD_APP_ID,
         STORAGE_PROTOCOL,
         META_STORAGE_KEY,
         INTEGRATION,
+        USER_MUTATION_PROTOCOL,
         SUPABASE_JS_PATH
       })
     });

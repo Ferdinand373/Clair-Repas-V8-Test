@@ -3,7 +3,7 @@
 
   const script = document.currentScript;
   const APP_ID = script?.dataset?.clairApp || 'clair';
-  const RELEASE = script?.dataset?.clairRelease || '8.0.0-foundation.10';
+  const RELEASE = script?.dataset?.clairRelease || '8.0.0-foundation.11';
   const DATA_SCHEMA = Number(script?.dataset?.clairSchema || 2);
   const CORE_REVISION = script?.dataset?.clairCore || '';
   const STORAGE_PROTOCOL = 'clair-test-storage/v1';

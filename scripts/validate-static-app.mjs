@@ -9,7 +9,7 @@ import { TextDecoder, TextEncoder } from "node:util";
 import vm from "node:vm";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const FOUNDATION_10_INDEX_BLOB = "a6c7123f825866fb12308e3e29d3977affafb8ea";
+const FOUNDATION_11_INDEX_BLOB = "686ce6784a0af5afc10942e058e65820cd70119d";
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const successes = [];
 const failures = [];
@@ -239,7 +239,11 @@ await check("Release metadata consistency", () => {
   assert.match(personalSync, /protocol:\s*'clair-personal-sync\/v1'/);
   assert.match(cloudSync, /const CLOUD_PROTOCOL = 'clair-cloud-sync\/v1'/);
   assert.equal(stringConstant(cloudSync, "CLOUD_APP_ID"), "clair-repas-v8-test");
-  assert.equal(stringConstant(cloudSync, "INTEGRATION"), "clair-v8-foundation.10");
+  assert.equal(stringConstant(cloudSync, "INTEGRATION"), "clair-v8-foundation.11");
+  assert.equal(
+    stringConstant(cloudSync, "USER_MUTATION_PROTOCOL"),
+    "clair-user-mutation/v1"
+  );
   assert.equal(
     stringConstant(cloudSync, "SUPABASE_JS_PATH"),
     "./v8/vendor/supabase-js-2.111.0.js"
@@ -260,7 +264,7 @@ await check("Release metadata consistency", () => {
   return release + " / product " + productVersion;
 });
 
-await check("Foundation.10 application shell identity", () => {
+await check("Foundation.11 application shell identity", () => {
   const normalizedIndex = indexHtml.replace(/\r\n?/g, "\n");
   const storageBootstrap =
     /<script src="\.\/v8\/clair-test-storage\.js" data-clair-v8-test-storage data-clair-storage-app="clair-repas-v8-test"><\/script>\n/;
@@ -280,11 +284,43 @@ await check("Foundation.10 application shell identity", () => {
   );
   assert.equal(
     gitBlobSha(canonicalIndex),
-    FOUNDATION_10_INDEX_BLOB,
-    "The reviewed Foundation.10 product shell changed unexpectedly"
+    FOUNDATION_11_INDEX_BLOB,
+    "The reviewed Foundation.11 product shell changed unexpectedly"
   );
   assert.doesNotMatch(indexHtml, /data-clair-v8-(?:sync|foundation|cloud-sync)/);
-  return "functional shell " + FOUNDATION_10_INDEX_BLOB.slice(0, 12) + "; 54 isolated accesses";
+  return "functional shell " + FOUNDATION_11_INDEX_BLOB.slice(0, 12) + "; 54 isolated accesses";
+});
+
+await check("Foundation.11 local-first loss guard and UI refresh wiring", () => {
+  for (const apiName of ["recordUserMutation", "subscribeLocalChanges"]) {
+    assert.match(cloudSync, new RegExp("\\b" + apiName + "\\b"));
+  }
+  for (const field of [
+    "localKeyCount",
+    "remoteKeyCount",
+    "conflictCount",
+    "hasConflict",
+    "guardedLossCount",
+    "lastGuard"
+  ]) {
+    assert.match(cloudSync, new RegExp("\\b" + field + "\\b"));
+  }
+  assert.match(cloudSync, /remote-loss-without-causal-user-proof/);
+  assert.match(cloudSync, /pendingMutations/);
+  assert.match(indexHtml, /ClairCloudSync\?\.recordUserMutation\?\.\(key,\{kind\}\)/);
+  assert.match(
+    indexHtml,
+    /ClairCloudSync\?\.subscribeLocalChanges\?\.\(refreshCloudSyncedPersonalUI\)/
+  );
+  const refreshSource = between(
+    inlineScripts[0],
+    "function refreshCloudSyncedPersonalUI(event){",
+    "\nfunction toggleFavorite"
+  );
+  assert.match(refreshSource, /V73_FAVORITES_RAW=null/);
+  assert.match(refreshSource, /V73_NOTES_RAW=null/);
+  assert.doesNotMatch(refreshSource, /localValue|remoteValue|payload\.value/);
+  return "causal proof, persisted intent, diagnostics and cache invalidation";
 });
 
 await check("PWA manifest and icons", () => {
