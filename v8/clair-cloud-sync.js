@@ -3,7 +3,7 @@
 
   const script = document.currentScript;
   const LOCAL_APP_ID = script?.dataset?.clairApp || 'clair';
-  const RELEASE = script?.dataset?.clairRelease || '8.0.0-foundation.9';
+  const RELEASE = script?.dataset?.clairRelease || '8.0.0-foundation.10';
   const DATA_SCHEMA = Number(script?.dataset?.clairSchema || 2);
   const CORE_REVISION = script?.dataset?.clairCore || '';
 
@@ -11,12 +11,11 @@
   const META_PROTOCOL = 'clair-cloud-sync-meta/v1';
   const CLOUD_APP_ID = 'clair-repas-v8-test';
   const STORAGE_PROTOCOL = 'clair-test-storage/v1';
-  const INTEGRATION = 'clair-v8-foundation.9';
+  const INTEGRATION = 'clair-v8-foundation.10';
   // Start a fresh technical history for the isolated personal namespace. The
   // previous metadata may describe production-origin cr... values and must not
   // generate deletions or uploads in the test bucket.
   const META_STORAGE_KEY = 'clair.v8.sync.meta.' + CLOUD_APP_ID + '.test-storage-v1';
-  const DEVICE_KEY_STORAGE = 'clair.device.key.v1';
   const SUPABASE_URL = 'https://ryyewskgfgysfubesdsj.supabase.co';
   const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_T9Dmg9VKTdMFdCuLVxD54w_7GeH3Q6S';
   const SUPABASE_JS_PATH = './v8/vendor/supabase-js-2.111.0.js';
@@ -250,31 +249,6 @@
     }
   }
 
-  function randomDeviceKey(cryptoApi = crypto) {
-    if (typeof cryptoApi?.randomUUID === 'function') {
-      return cryptoApi.randomUUID();
-    }
-    return (
-      Date.now().toString(36) +
-      '-' +
-      Math.random().toString(36).slice(2) +
-      '-' +
-      Math.random().toString(36).slice(2)
-    );
-  }
-
-  function deviceKey(storage, cryptoApi = crypto) {
-    try {
-      const existing = storage.getItem(DEVICE_KEY_STORAGE);
-      if (typeof existing === 'string' && existing.length >= 8) return existing;
-      const created = randomDeviceKey(cryptoApi);
-      storage.setItem(DEVICE_KEY_STORAGE, created);
-      return created;
-    } catch (_) {
-      return randomDeviceKey(cryptoApi);
-    }
-  }
-
   function platformLabel(navigatorApi = navigator) {
     const userAgent = String(navigatorApi?.userAgent || '');
     if (/iPhone/i.test(userAgent)) return 'iPhone';
@@ -365,16 +339,6 @@
           return null;
         }
         return userResult.data.user;
-      },
-
-      async registerDevice(record) {
-        const result = await client
-          .from('clair_devices')
-          .upsert(record, { onConflict: 'user_id,device_key' })
-          .select('id,user_id,device_key,label,platform,last_seen_at')
-          .single();
-        if (result.error) throw result.error;
-        return result.data;
       },
 
       async listData(query) {
@@ -1150,19 +1114,11 @@
           lastError: null
         });
 
-        const keyValue = deviceKey(storage, cryptoApi);
         const label = deviceLabel(navigatorApi);
-        const device = await transport.registerDevice({
-          user_id: user.id,
-          device_key: keyValue,
-          label,
-          platform: platformLabel(navigatorApi),
-          app_version: RELEASE,
-          last_seen_at: isoNow(),
-          updated_at: isoNow()
-        });
-        if (!device?.id) throw new Error('device-registration-failed');
-        device.label = device.label || label;
+        // The test app must not mutate the shared production device registry.
+        // clair_data.last_device_id is nullable; the human-readable source is
+        // still preserved in payload.source_device.
+        const device = { id: null, label };
 
         const remoteRows = await transport.listData({
           user_id: user.id,
@@ -1410,7 +1366,6 @@
         CLOUD_APP_ID,
         STORAGE_PROTOCOL,
         META_STORAGE_KEY,
-        DEVICE_KEY_STORAGE,
         INTEGRATION,
         SUPABASE_JS_PATH
       })

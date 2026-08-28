@@ -3979,15 +3979,16 @@ const V6_BACKUP_KEYS=[
 ];
 function clairRepasBackupKeys(){
   const keys=new Set(V6_BACKUP_KEYS);
-  try{
-    for(let index=0;index<window.ClairStorage.length;index+=1){
-      const key=window.ClairStorage.key(index);
-      if(key&&/^cr[A-Za-z0-9_.-]+$/.test(key))keys.add(key);
-    }
-  }catch(e){}
+  for(let index=0;index<window.ClairStorage.length;index+=1){
+    const key=window.ClairStorage.key(index);
+    if(key&&isClairRepasStorageKey(key))keys.add(key);
+  }
   return[...keys].sort();
 }
-function isClairRepasStorageKey(key){return V6_BACKUP_KEYS.includes(key)||/^cr[A-Za-z0-9_.-]+$/.test(String(key||''))}
+function isClairRepasStorageKey(key){
+  const normalized=String(key||'');
+  return normalized!=='crHealthProbeV73'&&(V6_BACKUP_KEYS.includes(normalized)||/^cr[A-Za-z0-9_.-]+$/.test(normalized));
+}
 function setProductStatus(message,type=''){
   const el=$('productStatus');
   if(!el)return;
@@ -4009,10 +4010,8 @@ function refreshProfessionalStatus(){
 function clairRepasBackupPayload(){
   const data={};
   for(const key of clairRepasBackupKeys()){
-    try{
-      const value=window.ClairStorage.getItem(key);
-      if(value!==null)data[key]=value;
-    }catch(e){}
+    const value=window.ClairStorage.getItem(key);
+    if(value!==null)data[key]=value;
   }
   return{app:'Clair Repas',schemaVersion:CR_DATA_SCHEMA_VERSION,appVersion:CR_APP_VERSION,recipeCount:recipeLibrary.length,exportedAt:new Date().toISOString(),data};
 }
@@ -4041,21 +4040,55 @@ async function exportClairRepasData(){
     setProductStatus('Impossible de créer la sauvegarde sur cet appareil.','warning');
   }
 }
+function applyClairRepasRestore(values){
+  const sync=window.ClairSync;
+  if(sync&&typeof sync.capture==='function'&&typeof sync.restore==='function'){
+    const capture=sync.capture();
+    if(!capture||!capture.ok)throw new Error('restore-capture-failed');
+    if(!sync.restore({...capture.values,...values}))throw new Error('restore-write-failed');
+    return;
+  }
+  const entries=Object.entries(values);
+  const before=new Map(entries.map(([key])=>[key,window.ClairStorage.getItem(key)]));
+  try{
+    for(const [key,value] of entries)window.ClairStorage.setItem(key,value);
+  }catch(error){
+    let recovered=true;
+    for(const [key] of [...entries].reverse()){
+      try{
+        const previous=before.get(key);
+        if(previous===null)window.ClairStorage.removeItem(key);
+        else window.ClairStorage.setItem(key,previous);
+      }catch(e){recovered=false}
+    }
+    if(!recovered)throw new Error('restore-rollback-failed');
+    throw error;
+  }
+}
 async function restoreClairRepasData(file){
   if(!file)return;
+  let payload;
+  let keys;
   try{
     const raw=await file.text();
-    const payload=JSON.parse(raw);
+    payload=JSON.parse(raw);
     if(!payload||payload.app!=='Clair Repas'||![1,CR_DATA_SCHEMA_VERSION].includes(Number(payload.schemaVersion))||!payload.data||typeof payload.data!=='object')throw new Error('invalid');
-    const keys=Object.keys(payload.data).filter(isClairRepasStorageKey);
+    keys=Object.keys(payload.data).filter(isClairRepasStorageKey);
     if(!keys.length)throw new Error('empty');
-    if(!window.confirm(`Restaurer ${keys.length} éléments de Clair Repas ? Les données actuelles correspondantes seront remplacées.`))return;
-    for(const key of keys)window.ClairStorage.setItem(key,String(payload.data[key]));
-    window.ClairStorage.setItem(V6_WELCOME_KEY,'seen');
+  }catch(e){
+    setProductStatus('Ce fichier ne semble pas être une sauvegarde Clair Repas valide.','warning');
+    return;
+  }
+  if(!window.confirm(`Restaurer ${keys.length} éléments de Clair Repas ? Les données actuelles correspondantes seront remplacées.`))return;
+  try{
+    const values={};
+    for(const key of keys)values[key]=String(payload.data[key]);
+    values[V6_WELCOME_KEY]='seen';
+    applyClairRepasRestore(values);
     setProductStatus('Sauvegarde restaurée. Clair Repas va se recharger.','success');
     setTimeout(()=>window.location.reload(),350);
   }catch(e){
-    setProductStatus('Ce fichier ne semble pas être une sauvegarde Clair Repas valide.','warning');
+    setProductStatus('La restauration a échoué. Vérifiez vos données locales avant de réessayer.','warning');
   }
 }
 function clairRepasVersionFromMarker(value){
@@ -4155,8 +4188,13 @@ function remapV39RecipeData(value,key=''){
 }
 function migrateV39RecipeReferences(){
   try{
-    if(window.ClairStorage.getItem(V39_DATA_MIGRATION_KEY)==='done')return;
-    const notes=JSON.parse(window.ClairStorage.getItem(RECIPE_NOTES_KEY)||'{}');
+    const sync=window.ClairSync;
+    if(!sync||typeof sync.capture!=='function'||typeof sync.restore!=='function')return;
+    const capture=sync.capture();
+    if(!capture||!capture.ok)return;
+    const target={...capture.values};
+    if(target[V39_DATA_MIGRATION_KEY]==='done')return;
+    const notes=JSON.parse(target[RECIPE_NOTES_KEY]||'{}');
     if(notes&&typeof notes==='object'&&!Array.isArray(notes)){
       for(const [oldId,newId] of Object.entries(V39_RECIPE_ID_MIGRATIONS)){
         if(typeof notes[oldId]!=='string'||!notes[oldId].trim())continue;
@@ -4165,7 +4203,7 @@ function migrateV39RecipeReferences(){
         notes[newId]=current&&current!==oldNote?(current+'\n\n'+oldNote).slice(0,2000):oldNote;
         delete notes[oldId];
       }
-      window.ClairStorage.setItem(RECIPE_NOTES_KEY,JSON.stringify(notes));
+      target[RECIPE_NOTES_KEY]=JSON.stringify(notes);
     }
     const keys=[
       FAVORITES_KEY,RECENT_RECIPES_KEY,REACTIONS_KEY,LEARNING_KEY,
@@ -4173,11 +4211,12 @@ function migrateV39RecipeReferences(){
       'crBrowserDiscoveryV34','crBrowserDecksV35','crStateV13','crHistoryV13'
     ];
     for(const key of keys){
-      const raw=window.ClairStorage.getItem(key);
+      const raw=target[key];
       if(!raw)continue;
-      try{window.ClairStorage.setItem(key,JSON.stringify(remapV39RecipeData(JSON.parse(raw))))}catch(e){}
+      target[key]=JSON.stringify(remapV39RecipeData(JSON.parse(raw)));
     }
-    window.ClairStorage.setItem(V39_DATA_MIGRATION_KEY,'done');
+    target[V39_DATA_MIGRATION_KEY]='done';
+    if(!sync.restore(target))return;
   }catch(e){}
 }
 migrateV39RecipeReferences();

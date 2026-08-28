@@ -9,7 +9,7 @@ import { TextDecoder, TextEncoder } from "node:util";
 import vm from "node:vm";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const FOUNDATION_8_INDEX_BLOB = "a591a41afc633f1058a94eeec7e8c2e01cedc6da";
+const FOUNDATION_10_INDEX_BLOB = "a6c7123f825866fb12308e3e29d3977affafb8ea";
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const successes = [];
 const failures = [];
@@ -239,7 +239,7 @@ await check("Release metadata consistency", () => {
   assert.match(personalSync, /protocol:\s*'clair-personal-sync\/v1'/);
   assert.match(cloudSync, /const CLOUD_PROTOCOL = 'clair-cloud-sync\/v1'/);
   assert.equal(stringConstant(cloudSync, "CLOUD_APP_ID"), "clair-repas-v8-test");
-  assert.equal(stringConstant(cloudSync, "INTEGRATION"), "clair-v8-foundation.9");
+  assert.equal(stringConstant(cloudSync, "INTEGRATION"), "clair-v8-foundation.10");
   assert.equal(
     stringConstant(cloudSync, "SUPABASE_JS_PATH"),
     "./v8/vendor/supabase-js-2.111.0.js"
@@ -260,12 +260,12 @@ await check("Release metadata consistency", () => {
   return release + " / product " + productVersion;
 });
 
-await check("Foundation.8 application shell identity", () => {
+await check("Foundation.10 application shell identity", () => {
   const normalizedIndex = indexHtml.replace(/\r\n?/g, "\n");
   const storageBootstrap =
     /<script src="\.\/v8\/clair-test-storage\.js" data-clair-v8-test-storage data-clair-storage-app="clair-repas-v8-test"><\/script>\n/;
   assert.equal((indexHtml.match(/data-clair-v8-test-storage/g) || []).length, 1);
-  assert.equal((indexHtml.match(/window\.ClairStorage/g) || []).length, 58);
+  assert.equal((indexHtml.match(/window\.ClairStorage/g) || []).length, 54);
   assert.doesNotMatch(indexHtml.replaceAll("window.ClairStorage", ""), /\blocalStorage\b/);
   assert.ok(
     indexHtml.indexOf("data-clair-v8-test-storage") <
@@ -280,11 +280,11 @@ await check("Foundation.8 application shell identity", () => {
   );
   assert.equal(
     gitBlobSha(canonicalIndex),
-    FOUNDATION_8_INDEX_BLOB,
-    "Only the isolated storage routing may differ from the Foundation.8 shell"
+    FOUNDATION_10_INDEX_BLOB,
+    "The reviewed Foundation.10 product shell changed unexpectedly"
   );
   assert.doesNotMatch(indexHtml, /data-clair-v8-(?:sync|foundation|cloud-sync)/);
-  return "functional shell " + FOUNDATION_8_INDEX_BLOB.slice(0, 12) + "; 58 isolated accesses";
+  return "functional shell " + FOUNDATION_10_INDEX_BLOB.slice(0, 12) + "; 54 isolated accesses";
 });
 
 await check("PWA manifest and icons", () => {
@@ -1076,6 +1076,46 @@ await check("Direct personal sync isolation", async () => {
   for (const key of ["cr", "CrA", "cr/a", "cr:a", "cr a", "cré", "clair.device.key.v1"]) {
     assert.equal(storageApi.isPersonalKey(key), false, key);
   }
+
+  const representativeKeys = [
+    "crFavMeals",
+    "crHistoryV13",
+    "crRecipeReactionsV3",
+    "crRecipeLearningV3",
+    "crStateV13",
+    "crRecipeNotesV31",
+    "crMode",
+    "crMealUsageV19",
+    "crBrowserDiscoveryV34"
+  ];
+  const categoryNative = makeNativeStorage(
+    representativeKeys.map((key) => [key, "PRODUCTION:" + key])
+  );
+  const categoryContext = {
+    window: { localStorage: categoryNative.storage },
+    document: storageDocument
+  };
+  vm.runInNewContext(testStorage, categoryContext, {
+    filename: "v8/clair-test-storage.js:category-isolation-smoke",
+    timeout: 1000
+  });
+  for (const key of representativeKeys) {
+    categoryContext.window.ClairStorage.setItem(key, "TEST:" + key);
+    assert.equal(categoryContext.window.ClairStorage.getItem(key), "TEST:" + key);
+    assert.equal(categoryNative.values.get(key), "PRODUCTION:" + key);
+    categoryContext.window.ClairStorage.removeItem(key);
+    assert.equal(categoryContext.window.ClairStorage.getItem(key), null);
+    assert.equal(categoryNative.values.get(key), "PRODUCTION:" + key);
+  }
+  assert.ok(
+    [...categoryNative.values.keys()].every(
+      (key) => !key.startsWith(personalPrefix)
+    )
+  );
+  assert.deepEqual(categoryNative.trace.rawReads, []);
+  assert.deepEqual(categoryNative.trace.rawWrites, []);
+  assert.deepEqual(categoryNative.trace.rawRemoves, []);
+
   assert.equal(storageApi.logicalKey("crA"), null);
   assert.equal(storageApi.logicalKey(personalPrefix + "crA"), "crA");
   assert.equal(storageApi.getItem("crA"), "test-a");
@@ -1092,6 +1132,18 @@ await check("Direct personal sync isolation", async () => {
   const visible = Array.from({ length: storageApi.length }, (_, index) => storageApi.key(index));
   assert.ok(visible.includes("crA") && visible.includes("crB") && visible.includes("crFavMeals"));
   assert.ok(!visible.includes("crProdOnly") && !visible.includes(personalPrefix + "crA"));
+
+  native.values.set(personalPrefix + "crOrphan", "interrupted-write");
+  assert.ok(
+    !JSON.parse(native.values.get(personalPrefix + "keys.v1")).includes("crOrphan")
+  );
+  assert.equal(storageApi.getItem("crOrphan"), "interrupted-write");
+  assert.ok(
+    JSON.parse(native.values.get(personalPrefix + "keys.v1")).includes("crOrphan")
+  );
+  storageApi.removeItem("crOrphan");
+  assert.equal(native.values.has(personalPrefix + "crOrphan"), false);
+
   storageApi.setItem("technical-probe", "native");
   assert.equal(native.values.get("technical-probe"), "native");
   storageApi.removeItem("technical-probe");
@@ -1288,10 +1340,249 @@ await check("Direct personal sync isolation", async () => {
   );
   assert.equal(rejectedContext.window.ClairStorage, undefined);
 
-  return "raw production cr values untouched; test namespace and rollback verified";
+  return "9 business categories isolated; orphan healing and rollback verified";
 });
 
-await check("Compatible newest snapshot selection", () => {
+await check("Manual persistence fails closed and remains retryable", () => {
+  const appSource = inlineScripts[0];
+  const backupKeysSource = between(
+    appSource,
+    "function clairRepasBackupKeys(){",
+    "\nfunction isClairRepasStorageKey"
+  );
+  const backupKeysContext = {
+    V6_BACKUP_KEYS: ["crFavMeals"],
+    window: {
+      ClairStorage: {
+        get length() {
+          throw new Error("manifest-read-failed");
+        }
+      }
+    }
+  };
+  vm.runInNewContext(
+    backupKeysSource +
+      "\n;globalThis.__clairRepasBackupKeys = clairRepasBackupKeys;",
+    backupKeysContext,
+    { filename: "index.html:backup-keys-smoke", timeout: 1000 }
+  );
+  assert.throws(
+    () => backupKeysContext.__clairRepasBackupKeys(),
+    /manifest-read-failed/
+  );
+  assert.doesNotMatch(backupKeysSource, /catch\s*\(/);
+
+  const storageKeySource = between(
+    appSource,
+    "function isClairRepasStorageKey(key){",
+    "\nfunction setProductStatus"
+  );
+  const storageKeyContext = { V6_BACKUP_KEYS: ["crFavMeals"] };
+  vm.runInNewContext(
+    storageKeySource +
+      "\n;globalThis.__isClairRepasStorageKey = isClairRepasStorageKey;",
+    storageKeyContext,
+    { filename: "index.html:manual-storage-key-smoke", timeout: 1000 }
+  );
+  assert.equal(storageKeyContext.__isClairRepasStorageKey("crFavMeals"), true);
+  assert.equal(storageKeyContext.__isClairRepasStorageKey("crLegacyOld"), true);
+  assert.equal(
+    storageKeyContext.__isClairRepasStorageKey("crHealthProbeV73"),
+    false
+  );
+
+  const backupPayloadSource = between(
+    appSource,
+    "function clairRepasBackupPayload(){",
+    "\nfunction backupFilename"
+  );
+  const backupPayloadContext = {
+    window: {
+      ClairStorage: {
+        getItem() {
+          throw new Error("personal-read-failed");
+        }
+      }
+    },
+    clairRepasBackupKeys: () => ["crFavMeals"],
+    CR_DATA_SCHEMA_VERSION: 2,
+    CR_APP_VERSION: "7.5",
+    recipeLibrary: [],
+    Date
+  };
+  vm.runInNewContext(
+    backupPayloadSource +
+      "\n;globalThis.__clairRepasBackupPayload = clairRepasBackupPayload;",
+    backupPayloadContext,
+    { filename: "index.html:backup-payload-smoke", timeout: 1000 }
+  );
+  assert.throws(
+    () => backupPayloadContext.__clairRepasBackupPayload(),
+    /personal-read-failed/
+  );
+  assert.doesNotMatch(backupPayloadSource, /catch\s*\(/);
+
+  const applyRestoreSource = between(
+    appSource,
+    "function applyClairRepasRestore(values){",
+    "\nasync function restoreClairRepasData"
+  );
+  const restoreCalls = [];
+  const currentValues = { crFavMeals: "old-favorite", crUntouched: "keep" };
+  const restoreContext = {
+    window: {
+      ClairSync: {
+        capture: () => ({ ok: true, values: { ...currentValues } }),
+        restore(values) {
+          restoreCalls.push(values);
+          return true;
+        }
+      }
+    }
+  };
+  vm.runInNewContext(
+    applyRestoreSource +
+      "\n;globalThis.__applyClairRepasRestore = applyClairRepasRestore;",
+    restoreContext,
+    { filename: "index.html:manual-restore-smoke", timeout: 1000 }
+  );
+  restoreContext.__applyClairRepasRestore({ crFavMeals: "new-favorite" });
+  assert.equal(restoreCalls.length, 1);
+  assert.equal(restoreCalls[0].crFavMeals, "new-favorite");
+  assert.equal(restoreCalls[0].crUntouched, "keep");
+  restoreContext.window.ClairSync.restore = () => false;
+  assert.throws(
+    () => restoreContext.__applyClairRepasRestore({ crFavMeals: "rejected" }),
+    /restore-write-failed/
+  );
+  assert.deepEqual(currentValues, {
+    crFavMeals: "old-favorite",
+    crUntouched: "keep"
+  });
+
+  const fallbackValues = new Map([
+    ["crFavMeals", "old-favorite"],
+    ["crHistoryV13", "old-history"]
+  ]);
+  let failFallbackWrite = true;
+  restoreContext.window.ClairSync = null;
+  restoreContext.window.ClairStorage = {
+    getItem: (key) => fallbackValues.get(key) ?? null,
+    setItem(key, value) {
+      if (key === "crHistoryV13" && failFallbackWrite) {
+        failFallbackWrite = false;
+        throw new Error("injected-fallback-write-failure");
+      }
+      fallbackValues.set(key, String(value));
+    },
+    removeItem: (key) => fallbackValues.delete(key)
+  };
+  assert.throws(
+    () =>
+      restoreContext.__applyClairRepasRestore({
+        crFavMeals: "new-favorite",
+        crHistoryV13: "new-history"
+      }),
+    /injected-fallback-write-failure/
+  );
+  assert.equal(fallbackValues.get("crFavMeals"), "old-favorite");
+  assert.equal(fallbackValues.get("crHistoryV13"), "old-history");
+  restoreContext.__applyClairRepasRestore({
+    crFavMeals: "new-favorite",
+    crHistoryV13: "new-history"
+  });
+  assert.equal(fallbackValues.get("crFavMeals"), "new-favorite");
+  assert.equal(fallbackValues.get("crHistoryV13"), "new-history");
+  assert.match(applyRestoreSource, /\[\.\.\.entries\]\.reverse\(\)/);
+
+  const restoreHandlerSource = between(
+    appSource,
+    "async function restoreClairRepasData(file){",
+    "\nfunction clairRepasVersionFromMarker"
+  );
+  assert.match(restoreHandlerSource, /applyClairRepasRestore\(values\)/);
+  assert.doesNotMatch(restoreHandlerSource, /ClairStorage\.setItem/);
+  assert.match(restoreHandlerSource, /Vérifiez vos données locales/);
+
+  const migrationSource = between(
+    appSource,
+    "function migrateV39RecipeReferences(){",
+    "\nmigrateV39RecipeReferences();"
+  );
+  let migrationValues = {
+    crRecipeNotesV31: "{}",
+    crFavMeals: '["legacy-favorite"]',
+    crRecentRecipesV25: '["legacy-recent"]'
+  };
+  let failMigrationRestore = true;
+  const migrationRestoreCalls = [];
+  const migrationSync = {
+    capture: () => ({ ok: true, values: { ...migrationValues } }),
+    restore(target) {
+      migrationRestoreCalls.push({ ...target });
+      if (failMigrationRestore) return false;
+      migrationValues = { ...target };
+      return true;
+    }
+  };
+  const migrationContext = {
+    window: { ClairSync: null },
+    V39_DATA_MIGRATION_KEY: "crRecipeIdMigrationV39",
+    RECIPE_NOTES_KEY: "crRecipeNotesV31",
+    V39_RECIPE_ID_MIGRATIONS: {},
+    FAVORITES_KEY: "crFavMeals",
+    RECENT_RECIPES_KEY: "crRecentRecipesV25",
+    REACTIONS_KEY: "crRecipeReactionsV3",
+    LEARNING_KEY: "crRecipeLearningV3",
+    remapV39RecipeData: (value) =>
+      Array.isArray(value)
+        ? value.map((item) => "migrated:" + item)
+        : value,
+    JSON
+  };
+  vm.runInNewContext(
+    migrationSource +
+      "\n;globalThis.__migrateV39RecipeReferences = migrateV39RecipeReferences;",
+    migrationContext,
+    { filename: "index.html:migration-retry-smoke", timeout: 1000 }
+  );
+  migrationContext.__migrateV39RecipeReferences();
+  assert.equal(migrationRestoreCalls.length, 0);
+  assert.equal(migrationValues.crFavMeals, '["legacy-favorite"]');
+
+  migrationContext.window.ClairSync = migrationSync;
+  migrationContext.__migrateV39RecipeReferences();
+  assert.equal(migrationRestoreCalls.length, 1);
+  assert.equal(migrationValues.crFavMeals, '["legacy-favorite"]');
+  assert.equal(migrationValues.crRecentRecipesV25, '["legacy-recent"]');
+  assert.equal(migrationValues.crRecipeIdMigrationV39, undefined);
+  assert.equal(
+    migrationRestoreCalls[0].crFavMeals,
+    '["migrated:legacy-favorite"]'
+  );
+  assert.equal(
+    migrationRestoreCalls[0].crRecentRecipesV25,
+    '["migrated:legacy-recent"]'
+  );
+  assert.equal(migrationRestoreCalls[0].crRecipeIdMigrationV39, "done");
+
+  failMigrationRestore = false;
+  migrationContext.__migrateV39RecipeReferences();
+  assert.equal(migrationRestoreCalls.length, 2);
+  assert.equal(migrationValues.crFavMeals, '["migrated:legacy-favorite"]');
+  assert.equal(
+    migrationValues.crRecentRecipesV25,
+    '["migrated:legacy-recent"]'
+  );
+  assert.equal(migrationValues.crRecipeIdMigrationV39, "done");
+  migrationContext.__migrateV39RecipeReferences();
+  assert.equal(migrationRestoreCalls.length, 2);
+  assert.doesNotMatch(migrationSource, /ClairStorage/);
+
+  return "backup errors surfaced; restore and migration are all-or-nothing";
+});
+
+await check("Compatible newest snapshot selection", async () => {
   const hashSource = between(foundation, "function fnv1a(text) {", "function appScopePath() {");
   const snapshotSource = between(
     foundation,
@@ -1382,7 +1673,144 @@ await check("Compatible newest snapshot selection", () => {
     ]),
     newPreboot
   );
-  return "newest isolated snapshot wins; legacy and malformed records skipped";
+
+  const putSnapshotSource = between(
+    foundation,
+    "async function putSnapshot(kind, values) {",
+    "\n  async function getSnapshot"
+  );
+  const snapshotWriteContext = {
+    APP_ID: "clair-repas",
+    capturePersonalData: () => ({ ok: true, values: { crA: "captured" } }),
+    validPersonalData: () => true,
+    makeRecord: (kind, values) => ({ kind, values }),
+    openDb: async () => {
+      throw new Error("indexeddb-open-failed");
+    }
+  };
+  vm.runInNewContext(
+    putSnapshotSource + "\n;globalThis.__putSnapshot = putSnapshot;",
+    snapshotWriteContext,
+    { filename: "v8/clair-foundation.js:snapshot-write-smoke", timeout: 1000 }
+  );
+  assert.equal(
+    await snapshotWriteContext.__putSnapshot("healthy", { crA: "safe" }),
+    null
+  );
+  assert.match(putSnapshotSource, /tx\.onabort\s*=/);
+
+  let abortedDbCloseCalls = 0;
+  const abortedDb = {
+    close() {
+      abortedDbCloseCalls += 1;
+    },
+    transaction() {
+      const transaction = {
+        error: new Error("indexeddb-transaction-aborted"),
+        objectStore: () => ({ put() {} })
+      };
+      Object.defineProperty(transaction, "onabort", {
+        set(handler) {
+          queueMicrotask(handler);
+        }
+      });
+      return transaction;
+    }
+  };
+  const abortedWriteContext = {
+    APP_ID: "clair-repas",
+    capturePersonalData: () => ({ ok: true, values: { crA: "captured" } }),
+    validPersonalData: () => true,
+    makeRecord: (kind, values) => ({ kind, values }),
+    openDb: async () => abortedDb
+  };
+  vm.runInNewContext(
+    putSnapshotSource + "\n;globalThis.__putSnapshot = putSnapshot;",
+    abortedWriteContext,
+    { filename: "v8/clair-foundation.js:snapshot-abort-smoke", timeout: 1000 }
+  );
+  assert.equal(
+    await abortedWriteContext.__putSnapshot("healthy", { crA: "safe" }),
+    null
+  );
+  assert.equal(abortedDbCloseCalls, 1);
+
+  const getSnapshotSource = between(
+    foundation,
+    "async function getSnapshot(kind) {",
+    "\n  function compatibleSnapshot"
+  );
+  assert.match(getSnapshotSource, /finally\s*\{/);
+  assert.match(getSnapshotSource, /db\?\.close\(\)/);
+
+  const confirmHealthyBootSource = between(
+    foundation,
+    "async function confirmHealthyBoot() {",
+    "\n  confirmHealthyBoot();"
+  );
+  async function runHealthyBoot(snapshotResult, duringSnapshot = null) {
+    const posts = [];
+    let failure = null;
+    let snapshotCalls = 0;
+    const bootContext = {
+      personalSync: {},
+      bootResolved: false,
+      Date: { now: () => 1000 },
+      BOOT_TIMEOUT_MS: 1000,
+      READY_STABLE_MS: 0,
+      config: { ready: () => true },
+      setTimeout: (callback) => callback(),
+      capturePersonalData: () => ({ ok: true, values: { crA: "safe" } }),
+      async putSnapshot() {
+        snapshotCalls += 1;
+        duringSnapshot?.(bootContext);
+        return snapshotResult;
+      },
+      async failBoot(reason, detail) {
+        if (bootContext.bootResolved) return;
+        bootContext.bootResolved = true;
+        failure = { reason, detail };
+      },
+      post(type, payload) {
+        posts.push({ type, payload });
+      }
+    };
+    vm.runInNewContext(
+      confirmHealthyBootSource +
+        "\n;globalThis.__confirmHealthyBoot = confirmHealthyBoot;",
+      bootContext,
+      { filename: "v8/clair-foundation.js:healthy-boot-smoke", timeout: 1000 }
+    );
+    await bootContext.__confirmHealthyBoot();
+    return { bootContext, failure, posts, snapshotCalls };
+  }
+
+  const failedHealthyBoot = await runHealthyBoot(null);
+  assert.equal(failedHealthyBoot.snapshotCalls, 1);
+  assert.equal(failedHealthyBoot.failure.reason, "snapshot-write-failed");
+  assert.equal(failedHealthyBoot.posts.length, 0);
+  assert.equal(failedHealthyBoot.bootContext.bootResolved, true);
+
+  const successfulHealthyBoot = await runHealthyBoot({
+    fingerprint: "fnv1a:persisted"
+  });
+  assert.equal(successfulHealthyBoot.failure, null);
+  assert.equal(successfulHealthyBoot.posts.length, 1);
+  assert.equal(successfulHealthyBoot.posts[0].type, "CLAIR_V8_BOOT_OK");
+  assert.equal(
+    successfulHealthyBoot.posts[0].payload.fingerprint,
+    "fnv1a:persisted"
+  );
+
+  const concurrentFailure = await runHealthyBoot(
+    { fingerprint: "fnv1a:must-not-be-posted" },
+    (bootContext) => {
+      bootContext.bootResolved = true;
+    }
+  );
+  assert.equal(concurrentFailure.posts.length, 0);
+
+  return "newest isolated snapshot wins; BOOT_OK requires persisted snapshot";
 });
 
 await check("Recipe-library integrity", () => {

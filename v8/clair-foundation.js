@@ -3,7 +3,7 @@
 
   const script = document.currentScript;
   const APP_ID = script?.dataset?.clairApp || 'clair';
-  const RELEASE = script?.dataset?.clairRelease || '8.0.0-foundation.9';
+  const RELEASE = script?.dataset?.clairRelease || '8.0.0-foundation.10';
   const DATA_SCHEMA = Number(script?.dataset?.clairSchema || 2);
   const CORE_REVISION = script?.dataset?.clairCore || '';
   const STORAGE_PROTOCOL = 'clair-test-storage/v1';
@@ -159,34 +159,39 @@
     const record = makeRecord(kind, values);
     record.id = `${APP_ID}:${kind}`;
 
+    let db = null;
     try {
-      const db = await openDb();
+      db = await openDb();
       await new Promise((resolve, reject) => {
         const tx = db.transaction(STORE, 'readwrite');
         tx.objectStore(STORE).put(record);
         tx.oncomplete = resolve;
         tx.onerror = () => reject(tx.error || new Error('snapshot-write-failed'));
+        tx.onabort = () => reject(tx.error || new Error('snapshot-write-aborted'));
       });
-      db.close();
       return record;
     } catch (_) {
-      return record;
+      return null;
+    } finally {
+      try { db?.close(); } catch (_) {}
     }
   }
 
   async function getSnapshot(kind) {
+    let db = null;
     try {
-      const db = await openDb();
+      db = await openDb();
       const record = await new Promise((resolve, reject) => {
         const tx = db.transaction(STORE, 'readonly');
         const request = tx.objectStore(STORE).get(`${APP_ID}:${kind}`);
         request.onsuccess = () => resolve(request.result || null);
         request.onerror = () => reject(request.error || new Error('snapshot-read-failed'));
       });
-      db.close();
       return record;
     } catch (_) {
       return null;
+    } finally {
+      try { db?.close(); } catch (_) {}
     }
   }
 
@@ -309,11 +314,20 @@
           return;
         }
 
-        bootResolved = true;
         const healthy = healthyCapture.values;
-        await putSnapshot('healthy', healthy);
+        const snapshot = await putSnapshot('healthy', healthy);
+        if (bootResolved) return;
+        if (!snapshot) {
+          await failBoot(
+            'snapshot-write-failed',
+            'Sauvegarde de sécurité des données personnelles impossible'
+          );
+          return;
+        }
+
+        bootResolved = true;
         post('CLAIR_V8_BOOT_OK', {
-          fingerprint: makeRecord('healthy', healthy).fingerprint
+          fingerprint: snapshot.fingerprint
         });
         return;
       }

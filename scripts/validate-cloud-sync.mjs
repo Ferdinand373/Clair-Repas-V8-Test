@@ -10,7 +10,7 @@ import vm from "node:vm";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const source = readFileSync(resolve(ROOT, "v8/clair-cloud-sync.js"), "utf8");
-const RELEASE = "8.0.0-foundation.9";
+const RELEASE = "8.0.0-foundation.10";
 const DATA_SCHEMA = 2;
 const CORE_REVISION = "sha256:test-core-revision";
 const TEST_APP_ID = "clair-repas-v8-test";
@@ -227,7 +227,7 @@ class MemoryTransport {
         value: deletedAt ? null : value,
         source_device: "Autre appareil",
         synced_at: updatedAt,
-        integration: "clair-v8-foundation.9"
+        integration: "clair-v8-foundation.10"
       },
       schema_version: DATA_SCHEMA,
       revision: options.revision ?? (current ? Number(current.revision) + 1 : 1),
@@ -327,6 +327,10 @@ function assertOnlyTestApp(transport) {
   assert.ok(ids.length > 0, "Expected at least one clair_data operation");
   assert.ok(ids.every((appId) => appId === TEST_APP_ID));
   assert.ok(ids.every((appId) => appId !== "clair-repas"));
+  assert.equal(transport.registerCalls.length, 0);
+  assert.ok(
+    transport.writeCalls.every((call) => call.record.last_device_id === null)
+  );
 }
 
 await check("Pinned SDK loader replaces a loaded-but-unavailable script", async () => {
@@ -389,7 +393,7 @@ await check("Pinned SDK loader replaces a loaded-but-unavailable script", async 
   assert.equal(secondScript.dataset.clairSupabaseReady, "true");
 });
 
-await check("Supabase adapter reuses auth and hard-locks clair_data to the test app", async () => {
+await check("Supabase adapter reuses auth, avoids clair_devices, and hard-locks test data", async () => {
   let getUserCalls = 0;
   let fromCalls = 0;
   const signedOutClient = {
@@ -459,9 +463,6 @@ await check("Supabase adapter reuses auth and hard-locks clair_data to the test 
       }
     };
     function result() {
-      if (table === "clair_devices") {
-        return { data: { id: "device-db", ...operation.record }, error: null };
-      }
       if (operation.action === "insert") {
         return {
           data: { id: "row-db", revision: 1, ...operation.record },
@@ -501,7 +502,6 @@ await check("Supabase adapter reuses auth and hard-locks clair_data to the test 
   };
   const signedIn = api.createSupabaseTransport(signedInClient);
   assert.equal((await signedIn.getAuthenticatedUser()).id, user.id);
-  await signedIn.registerDevice({ user_id: user.id, device_key: "device-key" });
   await signedIn.listData({ user_id: user.id, app_id: TEST_APP_ID });
   await signedIn.getData({
     user_id: user.id,
@@ -515,7 +515,7 @@ await check("Supabase adapter reuses auth and hard-locks clair_data to the test 
       data_key: "crAdapter",
       payload: { value: "x" },
       schema_version: DATA_SCHEMA,
-      last_device_id: "device-db",
+      last_device_id: null,
       updated_at: "2026-08-21T10:00:00.000Z",
       deleted_at: null
     },
@@ -528,7 +528,7 @@ await check("Supabase adapter reuses auth and hard-locks clair_data to the test 
       data_key: "crAdapter",
       payload: { value: "updated" },
       schema_version: DATA_SCHEMA,
-      last_device_id: "device-db",
+      last_device_id: null,
       updated_at: "2026-08-21T10:01:00.000Z",
       deleted_at: null
     },
@@ -565,6 +565,9 @@ await check("Supabase adapter reuses auth and hard-locks clair_data to the test 
     ["revision", 7]
   );
   assert.equal(Object.hasOwn(update.record, "revision"), false);
+  assert.ok(operations.every((operation) => operation.table === "clair_data"));
+  assert.doesNotMatch(source, /\.from\(['"]clair_devices['"]\)/);
+  assert.doesNotMatch(source, /DEVICE_KEY_STORAGE|registerDevice/);
 });
 
 await check("Cloud transport requires the isolated personal-storage contract", async () => {
@@ -626,10 +629,11 @@ await check("Local upload uses the raw value and test app_id", async () => {
   assert.equal(result.synced, true, JSON.stringify(result));
   const row = harness.transport.rows.get("crPrefs");
   assert.equal(row.payload.value, '{"mode":"local"}');
-  assert.equal(row.payload.integration, "clair-v8-foundation.9");
+  assert.equal(row.payload.integration, "clair-v8-foundation.10");
   assert.equal(row.payload.source_device, "Windows • Chrome");
   assert.equal(row.deleted_at, null);
-  assert.equal(harness.transport.registerCalls.length, 1);
+  assert.equal(row.last_device_id, null);
+  assert.equal(harness.transport.registerCalls.length, 0);
   assertOnlyTestApp(harness.transport);
 });
 
@@ -815,7 +819,11 @@ await check("Network and local restore failures preserve the local before-image"
 });
 
 await check("Technical metadata remains outside personal and cloud data", async () => {
-  const harness = makeHarness({ values: { crOnly: "personal" } });
+  const productionDeviceKey = "production-device-key-must-stay-untouched";
+  const storage = new FakeStorage({
+    "clair.device.key.v1": productionDeviceKey
+  });
+  const harness = makeHarness({ values: { crOnly: "personal" }, storage });
   await harness.runtime.syncNow("metadata-isolation");
   const metaKey = api.constants.META_STORAGE_KEY;
   assert.equal(
@@ -824,7 +832,11 @@ await check("Technical metadata remains outside personal and cloud data", async 
   );
   assert.equal(harness.sync.valid({ [metaKey]: "x" }), false);
   assert.ok(harness.storage.getItem(metaKey));
-  assert.ok(harness.storage.getItem(api.constants.DEVICE_KEY_STORAGE));
+  assert.equal(
+    harness.storage.getItem("clair.device.key.v1"),
+    productionDeviceKey
+  );
+  assert.equal(harness.transport.registerCalls.length, 0);
   assert.equal(harness.transport.rows.has(metaKey), false);
   assert.ok([...harness.transport.rows.keys()].every((key) => key.startsWith("cr")));
   assert.ok(

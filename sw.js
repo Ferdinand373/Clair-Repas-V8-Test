@@ -1,7 +1,7 @@
 "use strict";
 
 /*
- * Clair V8 Fondation — FOUNDATION.9 STABLE LAB
+ * Clair V8 Fondation — FOUNDATION.10 STABLE LAB
  *
  * Objectifs :
  * - mise à jour atomique ;
@@ -13,10 +13,10 @@
 
 const APP_ID = "clair-repas";
 const TEST_STORAGE_APP_ID = "clair-repas-v8-test";
-const RELEASE = "8.0.0-foundation.9";
+const RELEASE = "8.0.0-foundation.10";
 const FOUNDATION_LABEL = RELEASE.slice(RELEASE.lastIndexOf("-") + 1).toUpperCase();
 const DATA_SCHEMA = 2;
-const CORE_REVISION = "sha256:a22f7af14742c80ad3d656511561603b0e9206ac743d030ae00600d2bcbc961b";
+const CORE_REVISION = "sha256:7322d2a83620655f05f1e3f0ee7edb344f42bfc0bc03ceb7e1decd321199796f";
 const BOOT_GRACE_MS = 18000;
 
 function fnv1a(text) {
@@ -66,17 +66,17 @@ const FOUNDATION_CORE_FILES = LOCAL_SYNC_CORE_FILES.filter(
   path => path !== "./v8/clair-sync.js"
 );
 const CORE_DIGESTS = Object.freeze({
-  "./": "sha256:ce9bbf02bf88b959064c420933b75169971b9a03808c76c70011957cf3735d86",
-  "./index.html": "sha256:ce9bbf02bf88b959064c420933b75169971b9a03808c76c70011957cf3735d86",
+  "./": "sha256:9a3c8cc0252dc68c7a63e928c9366983792b050145d321ca0fbb109e457414ab",
+  "./index.html": "sha256:9a3c8cc0252dc68c7a63e928c9366983792b050145d321ca0fbb109e457414ab",
   "./manifest.webmanifest": "sha256:49b30612587c379d6bb8c6d9ade4e299ff244b41f0bd03e2fcca0a5495834e2a",
   "./icon-192.png": "sha256:8d0d516fdcb7d76a40df62dc92d4f312a1557b9e105917026780e465c32fa9f8",
   "./icon-512.png": "sha256:334f3158730e33ad8232ea229a39f9193b45274f1a72b2f55467b1e625924f70",
-  "./v8/clair-test-storage.js": "sha256:7fb08b770365a06f24e447db7b52dc547d0598c802893606aba9bbad8ce6d64a",
-  "./v8/clair-sync.js": "sha256:26ba7a04570d92e57d38e0c8ca7783070766ee183e0fa407e381b850b5987590",
+  "./v8/clair-test-storage.js": "sha256:e6f31f3c9fc9d0051b29266718a08a350b247093a99c01b6233a648f37f82bd5",
+  "./v8/clair-sync.js": "sha256:ea5bf3f66275f0a8985347605466594c67f4654a68bcc00925da13a2a29c96c9",
   "./v8/vendor/supabase-js-2.111.0.js": "sha256:7396012594aa6d23bb373ebc25d1080bf3672fa847c3713f756520b40fd13453",
-  "./v8/clair-foundation.js": "sha256:60ff85678673ab82d3e8ee6f46f73f882f3cf94a04cba1ccad460061067f3128",
-  "./v8/clair-cloud-sync.js": "sha256:e17375c1c8fc17b8f05423c11d27562845ff05d773512c197bd189158d9ca83f",
-  "./v8/version.json": "sha256:8ce6d59b9f3a56cff854b1098cadec650b087c71a69c7a34b8738fa5c4022aaa"
+  "./v8/clair-foundation.js": "sha256:12bfd9b41fde160dff632e8141522fba9041483a87067718f306fcae0ad51c89",
+  "./v8/clair-cloud-sync.js": "sha256:2169e2b5d3fe059e6aa609e1ef42d68b4a8713495a2b4a9455966cb68e9b08f5",
+  "./v8/version.json": "sha256:ed544f6af2aea3672b5734512e4cb06f4cc8c6bc8a44823485d1e7afb72a5792"
 });
 
 function appIndexUrl() {
@@ -127,7 +127,7 @@ function isolatedShellProfile(html) {
 
 async function requiredCoreFiles(cacheName, cache) {
   // Chaque génération de bootstrap conserve son propre ensemble atomique :
-  // Foundation.8, Foundation.9 local, puis Foundation.9 avec transport cloud.
+  // Foundation.8, Foundation.9 locale, puis Foundation.10 avec transport cloud.
   try {
     const rootShell = await cache.match(appRootUrl());
     const indexShell = await cache.match(appIndexUrl());

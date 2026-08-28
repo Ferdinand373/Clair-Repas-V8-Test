@@ -15,7 +15,7 @@
   }
 
   // Capture the browser storage once. The adapter never replaces or patches it:
-  // Supabase Auth, the shared device key and technical metadata stay native.
+  // Supabase Auth and technical metadata stay native.
   const nativeStorage = window.localStorage;
 
   function normalizedKey(key) {
@@ -83,7 +83,18 @@
       return manifestKeys()[position] ?? null;
     },
     getItem(key) {
-      return nativeStorage.getItem(physicalKey(key));
+      const logical = normalizedKey(key);
+      if (!isPersonalKey(logical)) return nativeStorage.getItem(logical);
+
+      const value = nativeStorage.getItem(physicalKey(logical));
+      if (value === null) return null;
+
+      // Repair a value left behind if the browser stopped between the physical
+      // write and its manifest update. Unmanifested values must not disappear
+      // from snapshots or manual backups.
+      const keys = manifestKeys();
+      if (!keys.includes(logical)) writeManifest([...keys, logical]);
+      return value;
     },
     setItem(key, value) {
       const logical = normalizedKey(key);
