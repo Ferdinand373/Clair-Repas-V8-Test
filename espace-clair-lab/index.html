@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#eef3ef">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Espace Clair Lab 1 — Clair Repas TEST</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="loading" class="loading" role="status" aria-live="polite">
+    <div class="loading-mark" aria-hidden="true">🌿</div>
+    <p id="loadingText">Recherche de la session commune…</p>
+  </div>
+
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="Espace Clair Lab 1">
+        <span class="brand-mark" aria-hidden="true">🌿</span>
+        <span><strong>Espace Clair</strong><small>Lab 1 · pont en lecture seule</small></span>
+      </a>
+      <span class="test-pill"><span class="status-dot"></span>TEST · données en lecture seule</span>
+    </header>
+
+    <section id="signedOut" class="signed-out" hidden>
+      <article class="hero panel">
+        <div>
+          <p class="eyebrow">Clair Repas · environnement isolé</p>
+          <h1>Vos données TEST, visibles en toute clarté.</h1>
+          <p class="hero-lead">Ce laboratoire observe uniquement les favoris et le nombre de notes synchronisés par Clair Repas V8 Test. Il ne fusionne, ne corrige et n’enregistre aucune donnée.</p>
+        </div>
+        <div class="principles">
+          <div><strong>Lecture seule</strong><span>Aucune mutation des données Clair Repas.</span></div>
+          <div><strong>Session commune</strong><span>Authentification Supabase officielle.</span></div>
+          <div><strong>TEST isolé</strong><span>Un seul identifiant d’application autorisé.</span></div>
+        </div>
+      </article>
+
+      <aside class="auth-card panel">
+        <p class="eyebrow">Connexion nécessaire · Session Supabase</p>
+        <h2>Se connecter au Lab</h2>
+        <p class="muted">Si Clair Repas est déjà connecté dans ce navigateur, cette étape disparaît automatiquement.</p>
+        <form id="authForm" class="auth-form">
+          <label for="authEmail">Adresse e-mail</label>
+          <input id="authEmail" type="email" autocomplete="email" required placeholder="vous@exemple.fr">
+          <label for="authPassword">Mot de passe</label>
+          <input id="authPassword" type="password" autocomplete="current-password" required placeholder="••••••••">
+          <button id="authButton" class="button primary" type="submit">Ouvrir la session commune</button>
+        </form>
+        <p id="authMessage" class="message" role="alert" hidden></p>
+        <p class="privacy-note">Le Lab ne crée ni profil, ni appareil, ni compte. La session reste partagée avec Clair Repas dans ce même navigateur et ce même profil, sans inspecter son stockage personnel.</p>
+      </aside>
+    </section>
+
+    <section id="dashboard" class="dashboard" hidden>
+      <div class="welcome">
+        <div>
+          <p class="eyebrow">Bridge.1 · observation active</p>
+          <h1>Clair Repas est relié.</h1>
+          <p>Le Lab affiche uniquement des indicateurs, jamais le contenu de vos notes ni l’identité de vos favoris.</p>
+        </div>
+        <span id="dataState" class="state-pill">Vérification des données TEST…</span>
+      </div>
+
+      <div class="grid">
+        <article class="card identity-card">
+          <p class="kicker">Session commune</p>
+          <h2>Identité authentifiée</h2>
+          <div class="identity-row">
+            <span class="avatar" aria-hidden="true">C</span>
+            <div>
+              <strong id="identityEmail">—</strong>
+              <span id="identityId" class="user-id">—</span>
+            </div>
+          </div>
+          <p class="card-note">L’identité est validée auprès de Supabase avant toute lecture personnelle.</p>
+        </article>
+
+        <article class="card readonly-card">
+          <p class="kicker">Frontière de sécurité</p>
+          <h2>Observation seulement</h2>
+          <div class="seal" aria-hidden="true">◌</div>
+          <p>Le Lab n’a aucune action d’écriture sur les données Clair Repas. Le formulaire éventuel ouvre seulement la session Auth officielle partagée.</p>
+        </article>
+
+        <article class="card metric-card">
+          <p class="kicker">Favoris</p>
+          <div id="favoritesCount" class="metric">—</div>
+          <p id="favoritesState" class="metric-label">Lecture en cours…</p>
+        </article>
+
+        <article class="card metric-card">
+          <p class="kicker">Notes de recettes</p>
+          <div id="notesCount" class="metric">—</div>
+          <p id="notesState" class="metric-label">Lecture en cours…</p>
+        </article>
+
+        <article class="card sync-card">
+          <p class="kicker">Application observée</p>
+          <h2>Clair Repas</h2>
+          <div class="connection-line"><span class="status-dot"></span><strong>Connecté en lecture seule</strong></div>
+          <p class="app-boundary">app_id&nbsp;: clair-repas-v8-test</p>
+          <p class="sync-label">Dernière synchronisation observée</p>
+          <div id="lastSync" class="sync-time">—</div>
+          <p id="sourceDevice" class="source-device">Source non renseignée</p>
+          <p id="readMessage" class="message" role="status" hidden></p>
+          <div class="actions">
+            <button id="refreshButton" class="button soft" type="button">Actualiser la lecture</button>
+            <a id="openTestLink" class="button primary" href="https://ferdinand373.github.io/Clair-Repas-V8-Test/">Ouvrir Clair Repas</a>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <footer>
+      <span>Espace Clair Lab 1</span>
+      <span>Clair Repas V8 Test · Foundation.11 inchangée</span>
+    </footer>
+  </main>
+
+  <noscript>JavaScript est nécessaire pour valider la session Supabase et lire les indicateurs TEST.</noscript>
+  <script src="../v8/vendor/supabase-js-2.111.0.js"></script>
+  <script src="./core.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
